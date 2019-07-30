@@ -1,6 +1,8 @@
-IF (PYTHON_CONFIG MATCHES "python3")
+IF (PYTHON_CONFIG MATCHES "python3" OR USE_SYSTEM_PYTHON MATCHES "3.")
+    PYTHON3_MODULE()
     EXPORTS_SCRIPT(catboost3.exports)
 ELSE()
+    PYTHON2_MODULE()
     EXPORTS_SCRIPT(catboost.exports)
 ENDIF()
 
@@ -9,6 +11,9 @@ PYTHON_ADDINCL()
 # add only headers for dynamic linking
 ADDINCL(
     contrib/python/numpy/numpy/core/include
+    contrib/python/numpy/numpy/core/include/numpy
+    contrib/python/numpy/numpy/core/src/common
+    contrib/python/numpy/numpy/core/src/npymath
 )
 
 PEERDIR(
@@ -23,11 +28,13 @@ PEERDIR(
     catboost/libs/documents_importance
     catboost/libs/eval_result
     catboost/libs/helpers
+    catboost/libs/hyperparameter_tuning
     catboost/libs/loggers
     catboost/libs/logging
     catboost/libs/metrics
     catboost/libs/model
     catboost/libs/options
+    catboost/libs/quantized_pool_analysis
     catboost/libs/target
     library/containers/2d_array
     library/json/writer

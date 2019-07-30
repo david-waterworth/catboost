@@ -10,11 +10,11 @@
 #include <catboost/libs/documents_importance/docs_importance.h>
 #include <catboost/libs/documents_importance/enums.h>
 #include <catboost/libs/model/model.h>
-#include <catboost/libs/model/formula_evaluator.h>
 #include <catboost/libs/logging/logging.h>
 #include <catboost/libs/options/cross_validation_params.h>
 #include <catboost/libs/helpers/int_cast.h>
 #include <catboost/libs/cat_feature/cat_feature.h>
+#include <catboost/libs/model/model_export/model_exporter.h>
 
 #include <util/generic/cast.h>
 #include <util/generic/mem_copy.h>
@@ -24,7 +24,6 @@
 #include <util/system/info.h>
 
 #include <algorithm>
-
 
 #if defined(SIZEOF_SIZE_T)
 #undef SIZEOF_SIZE_T
@@ -58,6 +57,7 @@ typedef TDataProviderPtr TPoolPtr;
 
 typedef TFullModel* TFullModelHandle;
 typedef std::unique_ptr<TFullModel> TFullModelPtr;
+
 
 class TRPackageInitializer {
     Y_DECLARE_SINGLETON_FRIEND();
@@ -189,6 +189,7 @@ SEXP CatBoostCreateFromMatrix_R(SEXP matrixParam,
         metaInfo.FeaturesLayout = MakeIntrusive<TFeaturesLayout>(
             dataColumns,
             ToUnsigned(GetVectorFromSEXP<int>(catFeaturesParam)),
+            TVector<ui32>{}, // TODO(d-kruchinin) support text features in R
             featureId);
 
         metaInfo.HasTarget = targetParam != R_NilValue;
@@ -323,7 +324,7 @@ SEXP CatBoostGetNumTrees_R(SEXP modelParam) {
     SEXP result = NULL;
     R_API_BEGIN();
     TFullModelHandle model = reinterpret_cast<TFullModelHandle>(R_ExternalPtrAddr(modelParam));
-    result = ScalarInteger(static_cast<int>(model->ObliviousTrees.GetTreeCount()));
+    result = ScalarInteger(static_cast<int>(model->GetTreeCount()));
     R_API_END();
     return result;
 }
@@ -331,6 +332,15 @@ SEXP CatBoostGetNumTrees_R(SEXP modelParam) {
 // TODO(dbakshee): remove this backward compatibility gag in v0.11
 SEXP CatBoostPoolNumTrees_R(SEXP modelParam) {
     return CatBoostGetNumTrees_R(modelParam);
+}
+
+SEXP CatBoostIsOblivious_R(SEXP modelParam) {
+    SEXP result = NULL;
+    R_API_BEGIN();
+    TFullModelHandle model = reinterpret_cast<TFullModelHandle>(R_ExternalPtrAddr(modelParam));
+    result = ScalarLogical(static_cast<int>(model->IsOblivious()));
+    R_API_END();
+    return result;
 }
 
 SEXP CatBoostPoolSlice_R(SEXP poolParam, SEXP sizeParam, SEXP offsetParam) {
@@ -389,6 +399,8 @@ SEXP CatBoostFit_R(SEXP learnPoolParam, SEXP testPoolParam, SEXP fitParamsAsJson
             Nothing(),
             Nothing(),
             pools,
+            /*initModel*/ Nothing(),
+            /*initLearnProgress*/ nullptr,
             "",
             modelPtr.get(),
             {&evalResult}
@@ -402,6 +414,8 @@ SEXP CatBoostFit_R(SEXP learnPoolParam, SEXP testPoolParam, SEXP fitParamsAsJson
             Nothing(),
             Nothing(),
             pools,
+            /*initModel*/ Nothing(),
+            /*initLearnProgress*/ nullptr,
             "",
             modelPtr.get(),
             {}
@@ -442,6 +456,7 @@ SEXP CatBoostCV_R(SEXP fitParamsAsJsonParam,
 
     CrossValidate(
         fitParams,
+        TQuantizedFeaturesInfoPtr(nullptr),
         Nothing(),
         Nothing(),
         pool,
@@ -488,19 +503,43 @@ SEXP CatBoostCV_R(SEXP fitParamsAsJsonParam,
     return result;
 }
 
-SEXP CatBoostOutputModel_R(SEXP modelParam, SEXP fileParam) {
+SEXP CatBoostOutputModel_R(SEXP modelParam, SEXP fileParam,
+                           SEXP formatParam, SEXP exportParametersParam, SEXP poolParam) {
     R_API_BEGIN();
     TFullModelHandle model = reinterpret_cast<TFullModelHandle>(R_ExternalPtrAddr(modelParam));
-    OutputModel(*model, CHAR(asChar(fileParam)));
+    THashMap<ui32, TString> catFeaturesHashToString;
+    TVector<TString> featureId;
+
+    if (poolParam != R_NilValue) {
+        TPoolHandle pool = reinterpret_cast<TPoolHandle>(R_ExternalPtrAddr(poolParam));
+        catFeaturesHashToString = MergeCatFeaturesHashToString(*pool->ObjectsData.Get());
+        featureId = pool->MetaInfo.FeaturesLayout.Get()->GetExternalFeatureIds();
+    }
+
+    EModelType modelType;
+    CB_ENSURE(TryFromString<EModelType>(CHAR(asChar(formatParam)), modelType),
+              "unsupported model type: 'cbm', 'coreml', 'cpp', 'python', 'json', 'onnx' or 'pmml' was expected");
+
+    ExportModel(*model,
+                CHAR(asChar(fileParam)),
+                modelType,
+                CHAR(asChar(exportParametersParam)),
+                false,
+                &featureId,
+                &catFeaturesHashToString
+                );
     R_API_END();
     return ScalarLogical(1);
 }
 
-SEXP CatBoostReadModel_R(SEXP fileParam) {
+SEXP CatBoostReadModel_R(SEXP fileParam, SEXP formatParam) {
     SEXP result = NULL;
     R_API_BEGIN();
+    EModelType modelType;
+    CB_ENSURE(TryFromString<EModelType>(CHAR(asChar(formatParam)), modelType),
+              "unsupported model type: 'CatboostBinary', 'AppleCoreML','Cpp','Python','Json','Onnx' or 'Pmml'  was expected");
     TFullModelPtr modelPtr = std::make_unique<TFullModel>();
-    ReadModel(CHAR(asChar(fileParam))).Swap(*modelPtr);
+    ReadModel(CHAR(asChar(fileParam)), modelType).Swap(*modelPtr);
     result = PROTECT(R_MakeExternalPtr(modelPtr.get(), R_NilValue, R_NilValue));
     R_RegisterCFinalizerEx(result, _Finalizer<TFullModelHandle>, TRUE);
     modelPtr.release();
@@ -543,6 +582,7 @@ SEXP CatBoostPredictMulti_R(SEXP modelParam, SEXP poolParam, SEXP verboseParam,
     EPredictionType predictionType;
     CB_ENSURE(TryFromString<EPredictionType>(CHAR(asChar(typeParam)), predictionType),
               "unsupported prediction type: 'Probability', 'Class' or 'RawFormulaVal' was expected");
+
     TVector<TVector<double>> prediction = ApplyModelMulti(*model,
                                                           *pool,
                                                           asLogical(verboseParam),
@@ -604,7 +644,7 @@ SEXP CatBoostShrinkModel_R(SEXP modelParam, SEXP treeCountStartParam, SEXP treeC
 SEXP CatBoostDropUnusedFeaturesFromModel_R(SEXP modelParam) {
     R_API_BEGIN();
     TFullModelHandle model = reinterpret_cast<TFullModelHandle>(R_ExternalPtrAddr(modelParam));
-    model->ObliviousTrees.DropUnusedFeatures();
+    model->ObliviousTrees.GetMutable()->DropUnusedFeatures();
     R_API_END();
     return ScalarLogical(1);
 }
@@ -625,14 +665,19 @@ SEXP CatBoostCalcRegularFeatureEffect_R(SEXP modelParam, SEXP poolParam, SEXP fs
     R_API_BEGIN();
     TFullModelHandle model = reinterpret_cast<TFullModelHandle>(R_ExternalPtrAddr(modelParam));
     TDataProviderPtr pool = reinterpret_cast<TPoolHandle>(R_ExternalPtrAddr(poolParam));
-    TString fstrType = CHAR(asChar(fstrTypeParam));
+    EFstrType fstrType = FromString<EFstrType>(CHAR(asChar(fstrTypeParam)));
 
     const int threadCount = UpdateThreadCount(asInteger(threadCountParam));
-    const bool multiClass = model->ObliviousTrees.ApproxDimension > 1;
+    const bool multiClass = model->GetDimensionsCount() > 1;
     const bool verbose = false;
     // TODO(akhropov): make prettified mode as in python-package
-    if (fstrType == "ShapValues" && multiClass) {
-        TVector<TVector<TVector<double>>> fstr = GetFeatureImportancesMulti(fstrType, *model, pool, threadCount, verbose);
+    if (fstrType == EFstrType::ShapValues && multiClass) {
+        TVector<TVector<TVector<double>>> fstr = GetFeatureImportancesMulti(fstrType,
+                                                                            *model,
+                                                                            pool,
+                                                                            threadCount,
+                                                                            EPreCalcShapValues::Auto,
+                                                                            verbose);
         size_t numDocs = fstr.size();
         size_t numClasses = numDocs > 0 ? fstr[0].size() : 0;
         size_t numValues = numClasses > 0 ? fstr[0][0].size() : 0;
@@ -652,7 +697,12 @@ SEXP CatBoostCalcRegularFeatureEffect_R(SEXP modelParam, SEXP poolParam, SEXP fs
         INTEGER(resultDim)[2] = numValues;
         setAttrib(result, R_DimSymbol, resultDim);
     } else {
-        TVector<TVector<double>> fstr = GetFeatureImportances(fstrType, *model, pool, threadCount, verbose);
+        TVector<TVector<double>> fstr = GetFeatureImportances(fstrType,
+                                                              *model,
+                                                              pool,
+                                                              threadCount,
+                                                              EPreCalcShapValues::Auto,
+                                                              verbose);
         size_t numRows = fstr.size();
         size_t numCols = numRows > 0 ? fstr[0].size() : 0;
         size_t resultSize = numRows * numCols;

@@ -180,11 +180,11 @@ class Plugin(CoveragePlugin):
                 iter_files = run_import_hook.resfs_files
 
             for c_file in iter_files():
-                if c_file.endswith('.pyx.c') or c_file.endswith('.pyx.cpp'):
+                if os.path.splitext(c_file)[1] in C_FILE_EXTENSIONS:
                     self._parse_lines(c_file, source_file)
                     if source_file in self._c_files_map:
                         return
-            raise AssertionError(source_file)
+            raise AssertionError((source_file, os.environ.get('PYTHON_COVERAGE_CYTHON_BUILD_ROOT')))
 
         if not os.path.isdir(dir_path):
             return
@@ -408,6 +408,10 @@ class OpenFile(object):
 # ======================= Redefine some methods ===============================
 
 if standalone():
+    import json
+
+    CYTHON_INCLUDE_MAP = {'undef': True}
+
 
     def _find_c_source(base_path):
         '''
@@ -430,10 +434,23 @@ if standalone():
                 import run_import_hook
                 return run_import_hook.resfs_src(filename, resfs_file=True)
 
-        for suffix in ['.pyx.c', '.pyx.cpp']:
+        if os.environ.get('PYTHON_COVERAGE_CYTHON_INCLUDE_MAP'):
+            if CYTHON_INCLUDE_MAP.get('undef'):
+                with open(os.environ['PYTHON_COVERAGE_CYTHON_INCLUDE_MAP']) as afile:
+                    data = json.load(afile)
+                    data = {os.path.splitext(k)[0]: v for k, v in data.iteritems()}
+
+                CYTHON_INCLUDE_MAP.clear()
+                CYTHON_INCLUDE_MAP.update(data)
+
+            if base_path in CYTHON_INCLUDE_MAP:
+                # target file was included and should be sought inside another pyx file
+                base_path = CYTHON_INCLUDE_MAP[base_path]
+
+        for suffix in ['.pyx.c', '.pyx.cpp'] + C_FILE_EXTENSIONS:
             if exists(base_path + suffix):
                 return base_path + suffix
-        sys.stderr.write("Failed to find c source: {} (skipping module)".format(base_path))
+
         return None
 
 

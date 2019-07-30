@@ -1,5 +1,4 @@
 #include "frequency_based_dictionary.h"
-
 #include "frequency_based_dictionary_impl.h"
 #include "util.h"
 
@@ -10,7 +9,7 @@
 #include <util/generic/array_ref.h>
 #include <util/generic/xrange.h>
 #include <util/stream/file.h>
-#include <util/string/iterator.h>
+#include <util/string/split.h>
 #include <util/string/join.h>
 #include <util/string/vector.h>
 

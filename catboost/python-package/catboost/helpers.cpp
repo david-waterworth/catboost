@@ -5,6 +5,9 @@
 #include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/helpers/interrupt.h>
 #include <catboost/libs/helpers/query_info_helper.h>
+#include <catboost/libs/target/data_providers.h>
+#include <catboost/libs/options/plain_options_helper.h>
+
 
 extern "C" PyObject* PyCatboostExceptionType;
 
@@ -56,16 +59,16 @@ TVector<TVector<double>> EvalMetrics(
     TRestorableFastRng64 rand(0);
 
     auto metricLossDescriptions = CreateMetricLossDescriptions(metricsDescription);
-    auto metrics = CreateMetrics(metricLossDescriptions, model.ObliviousTrees.ApproxDimension);
+    auto metrics = CreateMetrics(metricLossDescriptions, model.GetDimensionsCount());
     TMetricsPlotCalcer plotCalcer = CreateMetricCalcer(
         model,
         begin,
         end,
         evalPeriod,
         /*processedIterationsStep=*/50,
-        executor,
         tmpDir,
-        metrics
+        metrics,
+        &executor
     );
 
     auto processedDataProvider = NCB::CreateModelCompatibleProcessedDataProvider(
@@ -93,7 +96,7 @@ TVector<TVector<double>> EvalMetrics(
 }
 
 TVector<TString> GetMetricNames(const TFullModel& model, const TVector<TString>& metricsDescription) {
-    auto metrics = CreateMetricsFromDescription(metricsDescription, model.ObliviousTrees.ApproxDimension);
+    auto metrics = CreateMetricsFromDescription(metricsDescription, model.GetDimensionsCount());
     TVector<TString> metricNames;
     metricNames.reserve(metrics.ysize());
     for (auto& metric : metrics) {
@@ -108,17 +111,35 @@ TVector<double> EvalMetricsForUtils(
     const TString& metricName,
     const TVector<float>& weight,
     const TVector<TGroupId>& groupId,
+    const TVector<TSubgroupId>& subgroupId,
+    const TVector<TPair>& pairs,
     int threadCount
 ) {
     NPar::TLocalExecutor executor;
     executor.RunAdditionalThreads(threadCount - 1);
     const int approxDimension = approx.ysize();
-    const TVector<THolder<IMetric>> metrics = CreateMetricsFromDescription({metricName}, approxDimension);
+    TVector<THolder<IMetric>> metrics = CreateMetricsFromDescription({metricName}, approxDimension);
+    if (!weight.empty()) {
+        for (auto& metric : metrics) {
+            metric->UseWeights.SetDefaultValue(true);
+        }
+    }
+    NCB::TObjectsGrouping objectGrouping = NCB::CreateObjectsGroupingFromGroupIds(
+        label.size(),
+        groupId.empty() ? Nothing() : NCB::TMaybeData<TConstArrayRef<TGroupId>>(groupId)
+    );
+    if (!pairs.empty()) {
+        NCB::CheckPairs(pairs, objectGrouping);
+    }
     TVector<TQueryInfo> queriesInfo;
-
-    // TODO(nikitxskv): Make GroupWeight, SubgroupId and Pairs support.
-    UpdateQueriesInfo(groupId, /*groupWeight=*/{}, /*subgroupId=*/{}, /*beginDoc=*/0, groupId.ysize(), &queriesInfo);
-
+    if (!groupId.empty()) {
+        queriesInfo = *NCB::MakeGroupInfos(
+            objectGrouping,
+            subgroupId.empty() ? Nothing() : NCB::TMaybeData<TConstArrayRef<TSubgroupId>>(subgroupId),
+            NCB::TWeights(groupId.size()),
+            pairs
+        ).Get();
+    }
     TVector<double> metricResults;
     metricResults.reserve(metrics.size());
     for (const auto& metric : metrics) {
@@ -136,3 +157,34 @@ TVector<double> EvalMetricsForUtils(
     }
     return metricResults;
 }
+
+NJson::TJsonValue GetTrainingOptions(
+    const NJson::TJsonValue& plainJsonParams,
+    const NCB::TDataMetaInfo& trainDataMetaInfo,
+    const TMaybe<NCB::TDataMetaInfo>& testDataMetaInfo
+) {
+    NJson::TJsonValue trainOptionsJson;
+    NJson::TJsonValue outputFilesOptionsJson;
+    NCatboostOptions::PlainJsonToOptions(plainJsonParams, &trainOptionsJson, &outputFilesOptionsJson);
+    NCatboostOptions::TCatBoostOptions catboostOptions(NCatboostOptions::LoadOptions(trainOptionsJson));
+    NCatboostOptions::TOption<bool> useBestModelOption("use_best_model", false);
+    SetDataDependentDefaults(trainDataMetaInfo, testDataMetaInfo, /*learningContinuation*/ false, &useBestModelOption, &catboostOptions);
+    NJson::TJsonValue catboostOptionsJson;
+    catboostOptions.Save(&catboostOptionsJson);
+    return catboostOptionsJson;
+}
+
+NJson::TJsonValue GetPlainJsonWithAllOptions(const TFullModel& model, bool hasCatFeatures)
+{
+    NJson::TJsonValue trainOptions = ReadTJsonValue(model.ModelInfo.at("params"));
+    NJson::TJsonValue outputOptions = ReadTJsonValue(model.ModelInfo.at("output_options"));
+    NJson::TJsonValue plainOptions;
+    NCatboostOptions::ConvertOptionsToPlainJson(trainOptions, outputOptions, &plainOptions);
+    CB_ENSURE(!plainOptions.GetMapSafe().empty(), "plainOptions should not be empty.");
+    NJson::TJsonValue cleanedOptions(plainOptions);
+    CB_ENSURE(!cleanedOptions.GetMapSafe().empty(), "problems with copy constructor.");
+    NCatboostOptions::CleanPlainJson(hasCatFeatures, &cleanedOptions);
+    CB_ENSURE(!cleanedOptions.GetMapSafe().empty(), "cleanedOptions should not be empty.");
+    return cleanedOptions;
+}
+

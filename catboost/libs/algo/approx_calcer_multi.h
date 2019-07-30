@@ -1,9 +1,14 @@
 #pragma once
 
-#include "index_calcer.h"
-#include "online_predictor.h"
 #include "approx_updater_helpers.h"
 #include "error_functions.h"
+#include "fold.h"
+#include "index_calcer.h"
+#include "online_predictor.h"
+
+
+class TLearnContext;
+
 
 void UpdateApproxDeltasMulti(
     bool storeExpApprox,
@@ -40,7 +45,7 @@ inline void AddSampleToBucketGradientMulti(
 ) {
     Y_ASSERT(curDer != nullptr);
     error.CalcDersMulti(approx, target, weight, curDer, nullptr);
-    bucket->AddDerWeight(*curDer, weight, iteration);
+    bucket->AddDerWeight(*curDer, weight, /* updateWeight */ iteration == 0);
 }
 
 template <typename TAddSampleToBucket>

@@ -16,7 +16,6 @@
 #include <util/stream/input.h>
 #include <util/stream/labeled.h>
 #include <util/string/escape.h>
-#include <util/string/iterator.h>
 #include <util/string/split.h>
 
 #include <contrib/libs/protobuf/messagext.h>
@@ -37,7 +36,7 @@ static NCB::TPoolQuantizationSchema LoadInMatrixnetFormat(IInputStream* const in
     TVector<TStringBuf> columns;
     for (TString line; input->ReadLine(line); ++lineIndex) {
         columns.clear();
-        StringSplitter(line).SplitLimited('\t', 3).Collect(&columns);
+        StringSplitter(line).Split('\t').Limit(3).Collect(&columns);
 
         if (columns.size() < 2) {
             ythrow TCatBoostException() << "only " << columns.size() << "columns at line " << lineIndex;
@@ -217,6 +216,9 @@ NCB::TPoolQuantizationSchema NCB::QuantizationSchemaFromProto(
         schema.NanModes[i] = NanModeFromProto(featureSchema.GetNanMode());
     }
 
+    const auto& classNames = proto.GetClassNames();
+    schema.ClassNames.assign(classNames.begin(), classNames.end());
+
     return schema;
 }
 
@@ -236,6 +238,11 @@ NCB::NIdl::TPoolQuantizationSchema NCB::QuantizationSchemaToProto(
         proto.MutableFeatureIndexToSchema()->insert({
             static_cast<ui32>(schema.FeatureIndices[i]),
             std::move(featureSchema)});
+    }
+
+    proto.MutableClassNames()->Reserve(schema.ClassNames.size());
+    for (const auto className : schema.ClassNames) {
+        proto.AddClassNames(className);
     }
 
     return proto;

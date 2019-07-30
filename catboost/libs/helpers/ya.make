@@ -13,14 +13,18 @@ SRCS(
     dbg_output.cpp
     dense_hash.cpp
     dense_hash_view.cpp
+    double_array_iterator.cpp
+    dynamic_iterator.cpp
     element_range.cpp
     exception.cpp
+    guid.cpp
     hash.cpp
     int_cast.cpp
     interrupt.cpp
     map_merge.cpp
     math_utils.cpp
     matrix.cpp
+    maybe_data.cpp
     maybe_owning_array_holder.cpp
     mem_usage.cpp
     parallel_tasks.cpp
@@ -33,9 +37,11 @@ SRCS(
     restorable_rng.cpp
     serialization.cpp
     set.cpp
+    sparse_array.cpp
     vec_list.cpp
     vector_helpers.cpp
     wx_test.cpp
+    xml_output.cpp
 )
 
 PEERDIR(
@@ -49,7 +55,15 @@ PEERDIR(
     library/digest/crc32c
     library/digest/md5
     library/malloc/api
+    library/pop_count
     library/threading/local_executor
 )
 
+GENERATE_ENUM_SERIALIZATION(sparse_array.h)
+
 END()
+
+RECURSE(
+    parallel_sort
+    parallel_sort/ut
+)

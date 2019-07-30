@@ -83,48 +83,33 @@ Y_DECLARE_OUT_SPEC(inline, yexception, stream, value) {
     stream << value.AsStrBuf();
 }
 
-namespace NPrivate {
-    class TSystemErrorStatus {
-    public:
-        inline TSystemErrorStatus()
-            : Status_(LastSystemError())
-        {
-        }
-
-        inline TSystemErrorStatus(int status)
-            : Status_(status)
-        {
-        }
-
-        inline int Status() const noexcept {
-            return Status_;
-        }
-
-    private:
-        int Status_;
-    };
-}
-
-class TSystemError: public virtual NPrivate::TSystemErrorStatus, public virtual yexception {
+class TSystemError: public yexception {
 public:
-    inline TSystemError(int status)
-        : TSystemErrorStatus(status)
+    TSystemError(int status)
+        : Status_(status)
     {
         Init();
     }
 
-    inline TSystemError() {
-        Init();
+    TSystemError()
+        : TSystemError(LastSystemError())
+    {}
+
+    int Status() const noexcept {
+        return Status_;
     }
 
 private:
     void Init();
+
+private:
+    int Status_;
 };
 
-struct TIoException: public virtual yexception {
+class TIoException: public TSystemError {
 };
 
-class TIoSystemError: public TSystemError, public TIoException {
+class TIoSystemError: public TIoException {
 };
 
 class TFileError: public TIoSystemError {
@@ -166,10 +151,6 @@ void fputs(const std::exception& e, FILE* f = stderr);
 
 TString CurrentExceptionMessage();
 bool UncaughtException() noexcept;
-
-[[noreturn]] void ThrowBadAlloc();
-[[noreturn]] void ThrowLengthError(const char* descr);
-[[noreturn]] void ThrowRangeError(const char* descr);
 
 #define Y_ENSURE_EX(CONDITION, THROW_EXPRESSION) \
     do {                                         \

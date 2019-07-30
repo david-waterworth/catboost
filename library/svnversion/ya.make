@@ -1,12 +1,10 @@
 LIBRARY()
 
-CREATE_SVNVERSION_FOR(
-    svnversion.cpp
-    svnversion_data.h
-)
-
 SRCS(
     svnversion.cpp
+    svn_interface.c
 )
-
 END()
+RECURSE(
+    test
+)

@@ -11,6 +11,12 @@ from collections import Sequence, defaultdict
 import functools
 import traceback
 
+import sys
+if sys.version_info >= (3, 3):
+    from collections.abc import Iterable
+else:
+    from collections import Iterable
+
 import numpy as np
 cimport numpy as np
 
@@ -32,7 +38,7 @@ from libcpp.pair cimport pair
 from util.generic.array_ref cimport TArrayRef, TConstArrayRef
 from util.generic.hash cimport THashMap
 from util.generic.maybe cimport TMaybe
-from util.generic.ptr cimport THolder, TIntrusivePtr
+from util.generic.ptr cimport THolder, TIntrusivePtr, MakeHolder
 from util.generic.string cimport TString, TStringBuf
 from util.generic.vector cimport TVector
 from util.system.types cimport ui8, ui32, ui64, i64
@@ -119,6 +125,7 @@ cdef extern from "catboost/libs/options/enums.h":
 
     cdef EFeatureType EFeatureType_Float "EFeatureType::Float"
     cdef EFeatureType EFeatureType_Categorical "EFeatureType::Categorical"
+    cdef EFeatureType EFeatureType_Text "EFeatureType::Text"
 
 
     cdef cppclass EPredictionType:
@@ -127,6 +134,12 @@ cdef extern from "catboost/libs/options/enums.h":
     cdef EPredictionType EPredictionType_Class "EPredictionType::Class"
     cdef EPredictionType EPredictionType_Probability "EPredictionType::Probability"
     cdef EPredictionType EPredictionType_RawFormulaVal "EPredictionType::RawFormulaVal"
+
+    cdef cppclass EFstrType:
+        pass
+
+    cdef cppclass EPreCalcShapValues:
+        pass
 
 
 cdef extern from "catboost/libs/quantization_schema/schema.h" namespace "NCB":
@@ -143,11 +156,13 @@ cdef extern from "catboost/libs/data_new/features_layout.h" namespace "NCB":
 
     cdef cppclass TFeaturesLayout:
         TFeaturesLayout() except +ProcessException
+        TFeaturesLayout(const ui32 featureCount) except +ProcessException
         TFeaturesLayout(
             const ui32 featureCount,
             const TVector[ui32]& catFeatureIndices,
-            const TVector[TString]& featureId
-        )  except +ProcessException
+            const TVector[ui32]& textFeatureIndices,
+            const TVector[TString]& featureId,
+        ) except +ProcessException
 
         TConstArrayRef[TFeatureMetaInfo] GetExternalFeaturesMetaInfo() except +ProcessException
         TVector[TString] GetExternalFeatureIds() except +ProcessException
@@ -159,8 +174,16 @@ cdef extern from "catboost/libs/data_new/features_layout.h" namespace "NCB":
 
 
 cdef extern from "catboost/libs/data_new/meta_info.h" namespace "NCB":
+    cdef cppclass TTargetStats:
+        float MinValue
+        float MaxValue
+
     cdef cppclass TDataMetaInfo:
+        ui64 ObjectCount
+
         TIntrusivePtr[TFeaturesLayout] FeaturesLayout
+        ui64 MaxCatFeaturesUniqValuesOnLearn
+        TMaybe[TTargetStats] TargetStats
 
         bool_t HasTarget
         ui32 BaselineCount
@@ -455,6 +478,10 @@ cdef extern from "catboost/libs/algo/hessian.h":
     cdef cppclass THessianInfo:
         TVector[double] Data
 
+cdef extern from "catboost/libs/algo/learn_context.h":
+    cdef cppclass TLearnProgress:
+        pass
+
 
 cdef extern from "catboost/libs/model/ctr_provider.h":
     cdef cppclass ECtrTableMergePolicy:
@@ -462,40 +489,64 @@ cdef extern from "catboost/libs/model/ctr_provider.h":
 
 
 cdef extern from "catboost/libs/model/model.h":
+    cdef cppclass TFeaturePosition:
+        int Index
+        int FlatIndex
+
     cdef cppclass TCatFeature:
-        int FeatureIndex
-        int FlatFeatureIndex
+        TFeaturePosition Position
         TString FeatureId
 
     cdef cppclass TFloatFeature:
         bool_t HasNans
-        int FeatureIndex
-        int FlatFeatureIndex
+        TFeaturePosition Position
         TVector[float] Borders
         TString FeatureId
 
     cdef cppclass TObliviousTrees:
         int ApproxDimension
+        TVector[double] LeafValues
         TVector[TVector[double]] LeafWeights
         TVector[TCatFeature] CatFeatures
         TVector[TFloatFeature] FloatFeatures
         void DropUnusedFeatures() except +ProcessException
+        TVector[ui32] GetTreeLeafCounts() except +ProcessException
+
+    cdef cppclass TCOWTreeWrapper:
+        const TObliviousTrees& operator*() except +ProcessException
+        const TObliviousTrees* Get() except +ProcessException
+        TObliviousTrees* GetMutable() except +ProcessException
 
     cdef cppclass TFullModel:
-        TObliviousTrees ObliviousTrees
+        TCOWTreeWrapper ObliviousTrees
+        THashMap[TString, TString] ModelInfo
 
         bool_t operator==(const TFullModel& other) except +ProcessException
         bool_t operator!=(const TFullModel& other) except +ProcessException
 
-        THashMap[TString, TString] ModelInfo
         void Swap(TFullModel& other) except +ProcessException
         size_t GetTreeCount() nogil except +ProcessException
+        size_t GetDimensionsCount() nogil except +ProcessException
         void Truncate(size_t begin, size_t end) except +ProcessException
         bool_t IsOblivious() except +ProcessException
+        TString GetLossFunctionName() except +ProcessException
+        TVector[TString] GetModelClassNames() except +ProcessException
 
     cdef cppclass EModelType:
         pass
 
+    cdef TFullModel ReadModel(const TString& modelFile, EModelType format) nogil except +ProcessException
+    cdef TString SerializeModel(const TFullModel& model) except +ProcessException
+    cdef TFullModel DeserializeModel(const TString& serializeModelString) nogil except +ProcessException
+    cdef TVector[TString] GetModelUsedFeaturesNames(const TFullModel& model) except +ProcessException
+    cdef void SaveModelBorders(const TString& file, const TFullModel& model) nogil except +ProcessException
+
+ctypedef const TFullModel* TFullModel_const_ptr
+
+cdef extern from "catboost/libs/model/model.h":
+    cdef TFullModel SumModels(TVector[TFullModel_const_ptr], TVector[double], ECtrTableMergePolicy) nogil except +ProcessException
+
+cdef extern from "catboost/libs/model/model_export/model_exporter.h" namespace "NCB":
     cdef void ExportModel(
         const TFullModel& model,
         const TString& modelFile,
@@ -504,21 +555,7 @@ cdef extern from "catboost/libs/model/model.h":
         bool_t addFileFormatExtension,
         const TVector[TString]* featureId,
         const THashMap[ui32, TString]* catFeaturesHashToString
-    ) except +ProcessException
-
-    cdef void OutputModel(const TFullModel& model, const TString& modelFile) except +ProcessException
-    cdef TFullModel ReadModel(const TString& modelFile, EModelType format) nogil except +ProcessException
-    cdef TString SerializeModel(const TFullModel& model) except +ProcessException
-    cdef TFullModel DeserializeModel(const TString& serializeModelString) nogil except +ProcessException
-    cdef TVector[TString] GetModelUsedFeaturesNames(const TFullModel& model) except +ProcessException
-    cdef TVector[TString] GetModelClassNames(const TFullModel& model) except +ProcessException
-    cdef void SaveModelBorders(const TString& file, const TFullModel& model) nogil except +ProcessException
-
-ctypedef const TFullModel* TFullModel_const_ptr
-
-cdef extern from "catboost/libs/model/model.h":
-    cdef TFullModel SumModels(TVector[TFullModel_const_ptr], TVector[double], ECtrTableMergePolicy) nogil except +ProcessException
-
+    ) nogil except +ProcessException
 
 cdef extern from "library/json/writer/json_value.h" namespace "NJson":
     cdef cppclass TJsonValue:
@@ -556,9 +593,27 @@ cdef extern from "catboost/libs/algo/ders_holder.h":
         double Der2
 
 
+cdef extern from "catboost/libs/algo/tree_print.h":
+    TVector[TString] GetTreeSplitsDescriptions(
+        const TFullModel& model,
+        int tree_idx,
+        const TDataProviderPtr pool
+    ) nogil except +ProcessException
+
+    TVector[TString] GetTreeLeafValuesDescriptions(
+        const TFullModel& model,
+        int tree_idx,
+        int leaves_num
+    ) nogil except +ProcessException
+
+
 cdef extern from "catboost/libs/options/enum_helpers.h":
     cdef bool_t IsClassificationObjective(const TString& lossFunction) nogil except +ProcessException
+    cdef bool_t IsCvStratifiedObjective(const TString& lossFunction) nogil except +ProcessException
     cdef bool_t IsRegressionObjective(const TString& lossFunction) nogil except +ProcessException
+    cdef bool_t IsGroupwiseMetric(const TString& metricName) nogil except +ProcessException
+    cdef bool_t IsMultiClassCompatibleMetric(const TString& metricName) nogil except +ProcessException
+    cdef bool_t IsPairwiseMetric(const TString& metricName) nogil except +ProcessException
 
 cdef extern from "catboost/libs/metrics/metric.h":
     cdef cppclass TCustomMetricDescriptor:
@@ -574,6 +629,9 @@ cdef extern from "catboost/libs/metrics/metric.h":
         TString (*GetDescriptionFunc)(void *customData) except * with gil
         bool_t (*IsMaxOptimalFunc)(void *customData) except * with gil
         double (*GetFinalErrorFunc)(const TMetricHolder& error, void *customData) except * with gil
+    cdef bool_t IsMaxOptimal(const TString& metricName) nogil except +ProcessException
+    cdef bool_t IsMinOptimal(const TString& metricName) nogil except +ProcessException
+
 
 cdef extern from "catboost/libs/algo/custom_objective_descriptor.h":
     cdef cppclass TCustomObjectiveDescriptor:
@@ -597,6 +655,7 @@ cdef extern from "catboost/libs/algo/custom_objective_descriptor.h":
             void* customData
         ) with gil
 
+ctypedef pair[TVector[TVector[ui32]], TVector[TVector[ui32]]] TCustomTrainTestSubsets    
 cdef extern from "catboost/libs/options/cross_validation_params.h":
     cdef cppclass TCrossValidationParams:
         ui32 FoldCount
@@ -604,8 +663,17 @@ cdef extern from "catboost/libs/options/cross_validation_params.h":
         int PartitionRandSeed
         bool_t Shuffle
         bool_t Stratified
+        TMaybe[TVector[TVector[ui32]]] customTrainSubsets
+        TMaybe[TVector[TVector[ui32]]] customTestSubsets
         double MaxTimeSpentOnFixedCostRatio
         ui32 DevMaxIterationsBatchSize
+
+cdef extern from "catboost/libs/options/split_params.h":
+    cdef cppclass TTrainTestSplitParams:
+        int PartitionRandSeed
+        bool_t Shuffle
+        bool_t Stratified
+        double TrainPart
 
 cdef extern from "catboost/libs/options/check_train_options.h":
     cdef void CheckFitParams(
@@ -627,15 +695,18 @@ cdef extern from "catboost/libs/loggers/catboost_logger_helpers.h":
 
 cdef extern from "catboost/libs/train_lib/train_model.h":
     cdef void TrainModel(
-        const TJsonValue& params,
+        TJsonValue params,
         TQuantizedFeaturesInfoPtr quantizedFeaturesInfo,
         const TMaybe[TCustomObjectiveDescriptor]& objectiveDescriptor,
         const TMaybe[TCustomMetricDescriptor]& evalMetricDescriptor,
         TDataProviders pools,
+        TMaybe[TFullModel*] initModel,
+        THolder[TLearnProgress]* initLearnProgress,
         const TString& outputModelPath,
-        TFullModel* model,
+        TFullModel* dstModel,
         const TVector[TEvalResult*]& testApproxes,
-        TMetricsAndTimeLeftHistory* metricsAndTimeHistory
+        TMetricsAndTimeLeftHistory* metricsAndTimeHistory,
+        THolder[TLearnProgress]* dstLearnProgress
     ) nogil except +ProcessException
 
 cdef extern from "catboost/libs/train_lib/cross_validation.h":
@@ -648,7 +719,8 @@ cdef extern from "catboost/libs/train_lib/cross_validation.h":
         TVector[double] StdDevTest
 
     cdef void CrossValidate(
-        const TJsonValue& jsonParams,
+        TJsonValue jsonParams,
+        TQuantizedFeaturesInfoPtr quantizedFeaturesInfo,
         const TMaybe[TCustomObjectiveDescriptor]& objectiveDescriptor,
         const TMaybe[TCustomMetricDescriptor]& evalMetricDescriptor,
         TDataProviderPtr data,
@@ -671,15 +743,17 @@ cdef extern from "catboost/libs/algo/apply.h":
             TVector[TVector[double]]* approx
         ) nogil except +ProcessException
 
-    cdef TVector[double] ApplyModel(
-        const TFullModel& model,
-        const TDataProvider& objectsData,
-        bool_t verbose,
-        const EPredictionType predictionType,
-        int begin,
-        int end,
-        int threadCount
-    ) nogil except +ProcessException
+    cdef cppclass TLeafIndexCalcerOnPool:
+        TLeafIndexCalcerOnPool(
+            const TFullModel& model,
+            TIntrusivePtr[TObjectsDataProvider] objectsData,
+            int treeStart,
+            int treeEnd
+        ) nogil
+
+        bool_t Next() nogil except +ProcessException;
+        bool_t CanGet() nogil except +ProcessException;
+        TVector[ui32] Get() nogil except +ProcessException;
 
     cdef TVector[TVector[double]] ApplyModelMulti(
         const TFullModel& calcer,
@@ -690,6 +764,15 @@ cdef extern from "catboost/libs/algo/apply.h":
         int end,
         int threadCount
     ) nogil except +ProcessException
+
+    cdef TVector[ui32] CalcLeafIndexesMulti(
+        const TFullModel& model,
+        TIntrusivePtr[TObjectsDataProvider] objectsData,
+        bool_t verbose,
+        int treeStart,
+        int treeEnd,
+        int threadCount
+    )  nogil except +ProcessException
 
 cdef extern from "catboost/libs/algo/helpers.h":
     cdef void ConfigureMalloc() nogil except *
@@ -758,18 +841,20 @@ cdef extern from "catboost/libs/init/init_reg.h" namespace "NCB":
 
 cdef extern from "catboost/libs/fstr/calc_fstr.h":
     cdef TVector[TVector[double]] GetFeatureImportances(
-        const TString& type,
+        const EFstrType type,
         const TFullModel& model,
         const TDataProviderPtr dataset,
         int threadCount,
+        EPreCalcShapValues mode,
         int logPeriod
     ) nogil except +ProcessException
 
     cdef TVector[TVector[TVector[double]]] GetFeatureImportancesMulti(
-        const TString& type,
+        const EFstrType type,
         const TFullModel& model,
         const TDataProviderPtr dataset,
         int threadCount,
+        EPreCalcShapValues mode,
         int logPeriod
     ) nogil except +ProcessException
 
@@ -777,8 +862,6 @@ cdef extern from "catboost/libs/fstr/calc_fstr.h":
         const TFullModel& model,
         const TDataProviderPtr dataset
     ) nogil except +ProcessException
-
-    bool_t IsGroupwiseLearnedModel(const TFullModel& model) nogil except +ProcessException
 
 
 cdef extern from "catboost/libs/documents_importance/docs_importance.h":
@@ -853,6 +936,8 @@ cdef extern from "catboost/python-package/catboost/helpers.h":
         const TString& metricName,
         const TVector[float]& weight,
         const TVector[TGroupId]& groupId,
+        const TVector[TSubgroupId]& subgroup_id,
+        const TVector[TPair]& pairs,
         int threadCount
     ) nogil except +ProcessException
 
@@ -864,6 +949,91 @@ cdef extern from "catboost/python-package/catboost/helpers.h":
         TVector[TVector[double]] ComputeScores()
         void AddPool(const TDataProvider& srcData)
 
+    cdef TJsonValue GetTrainingOptions(
+        const TJsonValue& plainOptions,
+        const TDataMetaInfo& trainDataMetaInfo,
+        const TMaybe[TDataMetaInfo]& trainDataMetaInfo
+    ) nogil except +ProcessException
+
+    cdef TJsonValue GetPlainJsonWithAllOptions(
+        const TFullModel& model,
+        bool_t hasCatFeatures
+    ) nogil except +ProcessException
+
+cdef extern from "catboost/libs/quantized_pool_analysis/quantized_pool_analysis.h" namespace "NCB":
+    cdef cppclass TBinarizedFeatureStatistics:
+        TVector[float] Borders
+        TVector[int] BinarizedFeature
+        TVector[float] MeanTarget
+        TVector[float] MeanPrediction
+        TVector[size_t] ObjectsPerBin
+        TVector[double] PredictionsOnVaryingFeature
+
+    cdef cppclass TFeatureTypeAndInternalIndex:
+        EFeatureType Type
+        int Index
+
+    cdef TVector[TBinarizedFeatureStatistics] GetBinarizedStatistics(
+        const TFullModel& model,
+        TDataProvider& dataset,
+        const TVector[size_t]& catFeaturesNums,
+        const TVector[size_t]& floatFeaturesNums,
+        const EPredictionType predictionType,
+        const int threadCount) nogil except +ProcessException
+
+    cdef ui32 GetCatFeaturePerfectHash(
+        const TFullModel& model,
+        const TStringBuf& value,
+        const size_t featureNum) nogil except +ProcessException
+
+    cdef TFeatureTypeAndInternalIndex GetFeatureTypeAndInternalIndex(
+        const TFullModel& model,
+        const int flatFeatureIndex) nogil except +ProcessException
+
+    cdef TVector[TString] GetCatFeatureValues(
+        const TDataProvider& dataset,
+        const int flatFeatureIndex) nogil except +ProcessException
+
+cdef extern from "catboost/libs/hyperparameter_tuning/hyperparameter_tuning.h" namespace "NCB":
+    cdef cppclass TCustomRandomDistributionGenerator:
+        void* CustomData
+        double (*EvalFunc)(void* customData) with gil
+
+    cdef cppclass TBestOptionValuesWithCvResult:
+        TVector[TCVResult] CvResult
+        THashMap[TString, bool_t] BoolOptions
+        THashMap[TString, int] IntOptions
+        THashMap[TString, ui32] UIntOptions
+        THashMap[TString, double] DoubleOptions
+        THashMap[TString, TString] StringOptions
+
+    cdef void GridSearch(
+        const TJsonValue& grid,
+        const TJsonValue& params,
+        const TTrainTestSplitParams& trainTestSplitParams,
+        const TCrossValidationParams& cvParams,
+        const TMaybe[TCustomObjectiveDescriptor]& objectiveDescriptor,
+        const TMaybe[TCustomMetricDescriptor]& evalMetricDescriptor,
+        TDataProviderPtr pool,
+        TBestOptionValuesWithCvResult* results,
+        bool_t isSearchUsingCV,
+        bool_t isReturnCvResults,
+        int verbose) nogil except +ProcessException
+
+    cdef void RandomizedSearch(
+        ui32 numberOfTries,
+        const THashMap[TString, TCustomRandomDistributionGenerator]& randDistGenerators,
+        const TJsonValue& grid,
+        const TJsonValue& params,
+        const TTrainTestSplitParams& trainTestSplitParams,
+        const TCrossValidationParams& cvParams,
+        const TMaybe[TCustomObjectiveDescriptor]& objectiveDescriptor,
+        const TMaybe[TCustomMetricDescriptor]& evalMetricDescriptor,
+        TDataProviderPtr pool,
+        TBestOptionValuesWithCvResult* results,
+        bool_t isSearchUsingCV,
+        bool_t isReturnCvResults,
+        int verbose) nogil except +ProcessException
 
 cdef inline float _FloatOrNan(object obj) except *:
     try:
@@ -897,14 +1067,14 @@ cdef double _MetricGetFinalError(const TMetricHolder& error, void *customData) e
     return metricObject.get_final_error(error.Stats[0], error.Stats[1])
 
 
-cdef _vector_of_double_to_np_array(TVector[double]& vec):
+cdef _vector_of_double_to_np_array(const TVector[double]& vec):
     result = np.empty(vec.size(), dtype=_npfloat64)
     for i in xrange(vec.size()):
         result[i] = vec[i]
     return result
 
 
-cdef _2d_vector_of_double_to_np_array(TVector[TVector[double]]& vectors):
+cdef _2d_vector_of_double_to_np_array(const TVector[TVector[double]]& vectors):
     cdef size_t subvec_size = vectors[0].size() if not vectors.empty() else 0
     result = np.empty([vectors.size(), subvec_size], dtype=_npfloat64)
     for i in xrange(vectors.size()):
@@ -926,6 +1096,37 @@ cdef _3d_vector_of_double_to_np_array(TVector[TVector[TVector[double]]]& vectors
                 result[i][j][k] = vectors[i][j][k]
     return result
 
+cdef _vector_of_uints_to_np_array(TVector[ui32]& vec):
+    result = np.empty(vec.size(), dtype=np.uint32)
+    for i in xrange(vec.size()):
+        result[i] = vec[i]
+    return result
+
+cdef _vector_of_ints_to_np_array(TVector[int]& vec):
+    result = np.empty(vec.size(), dtype=np.int)
+    for i in xrange(vec.size()):
+        result[i] = vec[i]
+    return result
+
+cdef _vector_of_uints_to_2d_np_array(TVector[ui32]& vec, int row_count, int column_count):
+    assert vec.size() == row_count * column_count
+    result = np.empty((row_count, column_count), dtype=np.uint32)
+    for row_num in xrange(row_count):
+        for col_num in xrange(column_count):
+            result[row_num][col_num] = vec[row_num * column_count + col_num]
+    return result
+
+cdef _vector_of_floats_to_np_array(TVector[float]& vec):
+    result = np.empty(vec.size(), dtype=_npfloat32)
+    for i in xrange(vec.size()):
+        result[i] = vec[i]
+    return result
+
+cdef _vector_of_size_t_to_np_array(TVector[size_t]& vec):
+    result = np.empty(vec.size(), dtype=np.uint32)
+    for i in xrange(vec.size()):
+        result[i] = vec[i]
+    return result
 
 cdef class _FloatArrayWrapper:
     cdef const float* _arr
@@ -1001,6 +1202,19 @@ cdef TMetricHolder _MetricEval(
     holder.Stats[1] = weight_
     return holder
 
+cdef double _RandomDistGen(
+    void* customFunction
+) with gil:
+    cdef randomDistGenerator = <object>customFunction
+    cdef TString errorMessage
+    try:
+        rand_value = randomDistGenerator.rvs()
+    except:
+        errorMessage = to_arcadia_string(traceback.format_exc())
+        with nogil:
+            ThrowCppExceptionWithMessage(errorMessage)
+    return rand_value
+
 cdef void _ObjectiveCalcDersRange(
     int count,
     const double* approxes,
@@ -1062,6 +1276,13 @@ cdef void _ObjectiveCalcDersMulti(
             dereference(der2).Data[index] = num
             index += 1
 
+# customGenerator should have method rvs()
+cdef TCustomRandomDistributionGenerator _BuildCustomRandomDistributionGenerator(object customGenerator):
+    cdef TCustomRandomDistributionGenerator descriptor
+    descriptor.CustomData = <void*>customGenerator
+    descriptor.EvalFunc = &_RandomDistGen
+    return descriptor
+
 cdef TCustomMetricDescriptor _BuildCustomMetricDescriptor(object metricObject):
     cdef TCustomMetricDescriptor descriptor
     descriptor.CustomData = <void*>metricObject
@@ -1094,12 +1315,27 @@ cdef EModelType string_to_model_type(model_type_str) except *:
         raise CatBoostError("Unknown model type {}.".format(model_type_str))
     return model_type
 
+cdef EFstrType string_to_fstr_type(fstr_type_str) except *:
+    cdef EFstrType fstr_type
+    if not TryFromString[EFstrType](to_arcadia_string(fstr_type_str), fstr_type):
+        raise CatBoostError("Unknown type {}.".format(fstr_type_str))
+    return fstr_type
+
+cdef EPreCalcShapValues string_to_shap_mode(shap_mode_str) except *:
+    cdef EPreCalcShapValues shap_mode
+    if not TryFromString[EPreCalcShapValues](to_arcadia_string(shap_mode_str), shap_mode):
+        raise CatBoostError("Unknown shap values mode {}.".format(shap_mode_str))
+    return shap_mode
+
 
 cdef class _PreprocessParams:
     cdef TJsonValue tree
     cdef TMaybe[TCustomObjectiveDescriptor] customObjectiveDescriptor
     cdef TMaybe[TCustomMetricDescriptor] customMetricDescriptor
     def __init__(self, dict params):
+        if "ignored_features" in params:
+            params["ignored_features"] = list(map(str, params["ignored_features"]))
+
         eval_metric = params.get("eval_metric")
         objective = params.get("loss_function")
 
@@ -1141,6 +1377,35 @@ cdef class _PreprocessParams:
 
         self.tree = ReadTJsonValue(to_arcadia_string(dumps_params))
 
+cdef class _PreprocessGrids:
+    cdef TJsonValue tree
+    cdef THashMap[TString, TCustomRandomDistributionGenerator] custom_rnd_dist_gens
+    cdef int rdg_enumeration
+    def __prepare_grid(self, dict grid):
+        loss_functions = grid.get("loss_function", [])
+
+        params_to_json = {}
+        for param_name, values in grid.iteritems():
+            if isinstance(values, Iterable):
+                params_to_json[param_name] = list(values)
+            else:
+                if hasattr(values, "rvs"):
+                    rnd_name = "CustomRandomDistributionGenerator_" + str(self.rdg_enumeration)
+                    params_to_json[param_name] = [rnd_name]
+                    self.custom_rnd_dist_gens[to_arcadia_string(rnd_name)] = _BuildCustomRandomDistributionGenerator(values)
+                    self.rdg_enumeration += 1
+                else:
+                    raise CatBoostError("Error: not iterable and not random distribytion generator object at grid")
+
+        return params_to_json
+
+    def __init__(self, list grids_list):
+        prepared_grids = []
+        self.rdg_enumeration = 0
+        for grid in grids_list:
+            prepared_grids.append(self.__prepare_grid(grid))
+        dumps_grid = dumps(prepared_grids, cls=_NumpyAwareEncoder)
+        self.tree = ReadTJsonValue(to_arcadia_string(dumps_grid))
 
 cdef TString to_arcadia_string(s):
     cdef const unsigned char[:] bytes_s
@@ -1174,6 +1439,27 @@ cdef _npint64 = np.int64
 cdef _npfloat32 = np.float32
 cdef _npfloat64 = np.float64
 
+cpdef _prepare_cv_result(metric_name, const TVector[ui32]& iterations,
+        const TVector[double]& average_train, const TVector[double]& std_dev_train,
+        const TVector[double]& average_test, const TVector[double]& std_dev_test, result):
+    # sklearn-style preparation
+    fill_iterations_column = 'iterations' not in result
+    if fill_iterations_column:
+        result['iterations'] = list()
+    for it in xrange(iterations.size()):
+        iteration = iterations[it]
+        if fill_iterations_column:
+            result['iterations'].append(iteration)
+        else:
+            # ensure that all metrics have the same iterations specified
+            assert(result['iterations'][it] == iteration)
+        result["test-" + metric_name + "-mean"].append(average_test[it])
+        result["test-" + metric_name + "-std"].append(std_dev_test[it])
+
+        if average_train.size() != 0:
+            result["train-" + metric_name + "-mean"].append(average_train[it])
+            result["train-" + metric_name + "-std"].append(std_dev_train[it])
+    return result
 
 cdef inline get_id_object_bytes_string_representation(
     object id_object,
@@ -1341,8 +1627,9 @@ class FeaturesData(object):
         return self.num_feature_names + self.cat_feature_names
 
 
-cdef TFeaturesLayout* _init_features_layout(data, cat_features, feature_names):
+cdef TFeaturesLayout* _init_features_layout(data, cat_features, feature_names) except*:
     cdef TVector[ui32] cat_features_vector
+    cdef TVector[ui32] text_features_vector # TODO(d-kruchinin): support text features in python package
     cdef TVector[TString] feature_names_vector
 
     if isinstance(data, FeaturesData):
@@ -1363,6 +1650,7 @@ cdef TFeaturesLayout* _init_features_layout(data, cat_features, feature_names):
     return new TFeaturesLayout(
         <ui32>feature_count,
         cat_features_vector,
+        text_features_vector,
         feature_names_vector)
 
 cdef TVector[bool_t] _get_is_cat_feature_mask(const TFeaturesLayout* featuresLayout):
@@ -1510,7 +1798,7 @@ cdef object _set_features_order_data_pd_data_frame(
                 get_cat_factor_bytes_representation(
                     doc_idx,
                     flat_feature_idx,
-                    column_data[doc_idx] if column_type_is_pandas_Categorical else column_values[doc_idx],
+                    column_data.iloc[doc_idx] if column_type_is_pandas_Categorical else column_values[doc_idx],
                     &factor_string
                 )
                 cat_factor_data.push_back(factor_string)
@@ -1518,6 +1806,7 @@ cdef object _set_features_order_data_pd_data_frame(
         elif ((not column_type_is_pandas_Categorical) and
               (column_values.dtype == np.float32) and
               column_values.flags.aligned and
+
               column_values.flags.c_contiguous
             ):
 
@@ -2144,6 +2433,24 @@ cdef class _PoolBase:
         """
         return self.__pool.Get()[0].RawTargetData.GetPairs().size()
 
+    def get_group_id(self):
+        """
+        Get group_id for each object.
+
+        Returns
+        -------
+        group_id : list
+        """
+        cdef TMaybeData[TConstArrayRef[TGroupId]] arr_group_ids = self.__pool.Get()[0].ObjectsData.Get()[0].GetGroupIds()
+        if arr_group_ids.Defined():
+            result_group_ids = []
+            for group_id in arr_group_ids.GetRef():
+                result_group_ids.append(group_id)
+
+            return result_group_ids
+
+        return None
+
     @property
     def shape(self):
         """
@@ -2194,7 +2501,7 @@ cdef class _PoolBase:
         """
         cdef TMaybeData[TConstArrayRef[TString]] maybe_target = self.__pool.Get()[0].RawTargetData.GetTarget()
         if maybe_target.Defined():
-            return [self.target_type(target_string.decode()) for target_string in maybe_target.GetRef()]
+            return [self.target_type(to_native_str(target_string)) for target_string in maybe_target.GetRef()]
         return None
 
     cpdef get_cat_feature_indices(self):
@@ -2304,6 +2611,7 @@ cdef class _CatBoost:
     cdef TFullModel* __model
     cdef TVector[TEvalResult*] __test_evals
     cdef TMetricsAndTimeLeftHistory __metrics_history
+    cdef THolder[TLearnProgress] __cached_learn_progress
 
     def __cinit__(self):
         self.__model = new TFullModel()
@@ -2320,8 +2628,7 @@ cdef class _CatBoost:
         return self.__model != other.__model
 
     cpdef _reserve_test_evals(self, num_tests):
-        if self.__test_evals.size() < num_tests:
-            self.__test_evals.resize(num_tests)
+        self.__test_evals.resize(num_tests)
         for i in range(num_tests):
             if self.__test_evals[i] == NULL:
                 self.__test_evals[i] = new TEvalResult()
@@ -2330,7 +2637,7 @@ cdef class _CatBoost:
         for i in range(self.__test_evals.size()):
             dereference(self.__test_evals[i]).ClearRawValues()
 
-    cpdef _train(self, _PoolBase train_pool, test_pools, dict params, allow_clear_pool):
+    cpdef _train(self, _PoolBase train_pool, test_pools, dict params, allow_clear_pool, maybe_init_model):
         _input_borders = params.pop("input_borders", None)
         prep_params = _PreprocessParams(params)
         cdef int thread_count = params.get("thread_count", 1)
@@ -2340,14 +2647,29 @@ cdef class _CatBoost:
         cdef TVector[ui32] ignored_features
         cdef TQuantizedFeaturesInfoPtr quantizedFeaturesInfo
         cdef TString input_borders_str
+        cdef _CatBoost init_model
+        cdef TMaybe[TFullModel*] init_model_param
+        cdef THolder[TLearnProgress]* init_learn_progress_param
+        cdef THolder[TLearnProgress]* dst_learn_progress_param
+
+        task_type = params.get('task_type', 'CPU')
+
         if isinstance(test_pools, list):
-            if params.get('task_type', 'CPU') == 'GPU' and len(test_pools) > 1:
+            if task_type == 'GPU' and len(test_pools) > 1:
                 raise CatBoostError('Multiple eval sets are not supported on GPU')
             for test_pool in test_pools:
                 dataProviders.Test.push_back(test_pool.__pool)
         else:
             test_pool = test_pools
             dataProviders.Test.push_back(test_pool.__pool)
+        if maybe_init_model is not None:
+            if not isinstance(maybe_init_model, _CatBoost):
+                raise CatBoostError('init_model is not an instance of _CatBoost class')
+            init_model = maybe_init_model
+            init_model_param = init_model.__model
+            init_learn_progress_param = &(init_model.__cached_learn_progress)
+        else:
+            init_learn_progress_param = <THolder[TLearnProgress]*>nullptr
         self._reserve_test_evals(dataProviders.Test.size())
         self._clear_test_evals()
 
@@ -2363,6 +2685,11 @@ cdef class _CatBoost:
                     input_borders_str,
                     quantizedFeaturesInfo.Get())
 
+        if task_type == 'CPU':
+            dst_learn_progress_param = &self.__cached_learn_progress
+        else:
+            dst_learn_progress_param = <THolder[TLearnProgress]*>nullptr
+
         with nogil:
             SetPythonInterruptHandler()
             try:
@@ -2372,10 +2699,13 @@ cdef class _CatBoost:
                     prep_params.customObjectiveDescriptor,
                     prep_params.customMetricDescriptor,
                     dataProviders,
+                    init_model_param,
+                    init_learn_progress_param,
                     TString(<const char*>""),
                     self.__model,
                     self.__test_evals,
-                    &self.__metrics_history
+                    &self.__metrics_history,
+                    dst_learn_progress_param
                 )
             finally:
                 ResetPythonInterruptHandler()
@@ -2404,15 +2734,22 @@ cdef class _CatBoost:
 
     cpdef _get_metrics_evals(self):
         metrics_evals = defaultdict(functools.partial(defaultdict, list))
-        num_iterations = self.__metrics_history.LearnMetricsHistory.size()
-        for iter in range(num_iterations):
-            for metric, value in self.__metrics_history.LearnMetricsHistory[iter]:
+        iteration_count = self.__metrics_history.LearnMetricsHistory.size()
+        for iteration_num in range(iteration_count):
+            for metric, value in self.__metrics_history.LearnMetricsHistory[iteration_num]:
                 metrics_evals["learn"][to_native_str(metric)].append(value)
-            if not self.__metrics_history.TestMetricsHistory.empty():
-                num_tests = self.__metrics_history.TestMetricsHistory[iter].size()
-                for test in range(num_tests):
-                    for metric, value in self.__metrics_history.TestMetricsHistory[iter][test]:
-                        metrics_evals["validation_" + str(test)][to_native_str(metric)].append(value)
+
+        if not self.__metrics_history.TestMetricsHistory.empty():
+            test_count = 0
+            for i in range(iteration_count):
+                test_count = max(test_count, self.__metrics_history.TestMetricsHistory[i].size())
+            for iteration_num in range(iteration_count):
+                for test_index in range(self.__metrics_history.TestMetricsHistory[iteration_num].size()):
+                    eval_set_name = "validation"
+                    if test_count > 1:
+                        eval_set_name += "_" + str(test_index)
+                    for metric, value in self.__metrics_history.TestMetricsHistory[iteration_num][test_index]:
+                        metrics_evals[eval_set_name][to_native_str(metric)].append(value)
         return {k: dict(v) for k, v in iteritems(metrics_evals)}
 
     cpdef _get_best_score(self):
@@ -2423,9 +2760,12 @@ cdef class _CatBoost:
         for metric, best_error in self.__metrics_history.LearnBestError:
             best_scores["learn"][to_native_str(metric)] = best_error
         for testIdx in range(self.__metrics_history.TestBestError.size()):
-            best_scores["validation_" + str(testIdx)] = {}
+            eval_set_name = "validation"
+            if self.__metrics_history.TestBestError.size() > 1:
+                eval_set_name += "_" + str(testIdx)
+            best_scores[eval_set_name] = {}
             for metric, best_error in self.__metrics_history.TestBestError[testIdx]:
-                best_scores["validation_" + str(testIdx)][to_native_str(metric)] = best_error
+                best_scores[eval_set_name][to_native_str(metric)] = best_error
         return best_scores
 
     cpdef _get_best_iteration(self):
@@ -2434,20 +2774,22 @@ cdef class _CatBoost:
         return None
 
     cpdef _has_leaf_weights_in_model(self):
-        return not self.__model.ObliviousTrees.LeafWeights.empty()
+        return not self.__model.ObliviousTrees.Get().LeafWeights.empty()
 
     cpdef _get_cat_feature_indices(self):
-        return [feature.FlatFeatureIndex for feature in self.__model.ObliviousTrees.CatFeatures]
+        cdef TConstArrayRef[TCatFeature] arrayView = <TConstArrayRef[TCatFeature]>self.__model.ObliviousTrees.Get().CatFeatures
+        return [feature.Position.FlatIndex for feature in arrayView]
 
     cpdef _get_float_feature_indices(self):
-        return [feature.FlatFeatureIndex for feature in self.__model.ObliviousTrees.FloatFeatures]
+        cdef TConstArrayRef[TFloatFeature] arrayView = <TConstArrayRef[TFloatFeature]>self.__model.ObliviousTrees.Get().FloatFeatures
+        return [feature.Position.FlatIndex for feature in arrayView]
 
     cpdef _base_predict(self, _PoolBase pool, str prediction_type, int ntree_start, int ntree_end, int thread_count, bool_t verbose):
         cdef TVector[double] pred
         cdef EPredictionType predictionType = PyPredictionType(prediction_type).predictionType
         thread_count = UpdateThreadCount(thread_count);
         with nogil:
-            pred = ApplyModel(
+            pred = ApplyModelMulti(
                 dereference(self.__model),
                 dereference(pool.__pool.Get()),
                 verbose,
@@ -2455,7 +2797,7 @@ cdef class _CatBoost:
                 ntree_start,
                 ntree_end,
                 thread_count
-            )
+            )[0]
         return _vector_of_double_to_np_array(pred)
 
 
@@ -2482,6 +2824,28 @@ cdef class _CatBoost:
         stagedPredictIterator._initialize_model_calcer(self.__model, pool)
         return stagedPredictIterator
 
+    cpdef _base_calc_leaf_indexes(self, _PoolBase pool, int ntree_start, int ntree_end,
+                                  int thread_count, bool_t verbose):
+        cdef int tree_count = ntree_end - ntree_start
+        cdef int object_count = pool.__pool.Get()[0].ObjectsData.Get()[0].GetObjectCount()
+        cdef TVector[ui32] flat_leaf_indexes
+        thread_count = UpdateThreadCount(thread_count);
+        with nogil:
+            flat_leaf_indexes = CalcLeafIndexesMulti(
+                dereference(self.__model),
+                pool.__pool.Get()[0].ObjectsData,
+                verbose,
+                ntree_start,
+                ntree_end,
+                thread_count
+            )
+        return _vector_of_uints_to_2d_np_array(flat_leaf_indexes, object_count, tree_count)
+
+    cpdef _leaf_indexes_iterator(self, _PoolBase pool, int ntree_start, int ntree_end):
+        leafIndexIterator = _LeafIndexIterator()
+        leafIndexIterator._initialize(self.__model, pool, ntree_start, ntree_end)
+        return leafIndexIterator
+
     cpdef _base_eval_metrics(self, _PoolBase pool, metric_descriptions, int ntree_start, int ntree_end, int eval_period, int thread_count, result_dir, tmp_dir):
         thread_count = UpdateThreadCount(thread_count);
         cdef TVector[TString] metricDescriptions
@@ -2503,10 +2867,10 @@ cdef class _CatBoost:
         cdef TVector[TString] metric_names = GetMetricNames(dereference(self.__model), metricDescriptions)
         return metrics, [to_native_str(name) for name in metric_names]
 
-    cpdef bool_t _is_groupwise_learned_model(self):
-        return IsGroupwiseLearnedModel(dereference(self.__model))
+    cpdef _get_loss_function_name(self):
+        return self.__model.GetLossFunctionName()
 
-    cpdef _calc_fstr(self, type_name, _PoolBase pool, int thread_count, int verbose):
+    cpdef _calc_fstr(self, type_name, _PoolBase pool, int thread_count, int verbose, shap_mode_name):
         thread_count = UpdateThreadCount(thread_count);
         cdef TVector[TString] feature_ids = GetMaybeGeneratedModelFeatureIds(
             dereference(self.__model),
@@ -2519,24 +2883,29 @@ cdef class _CatBoost:
         cdef TDataProviderPtr dataProviderPtr
         if pool:
             dataProviderPtr = pool.__pool
-        cdef TString type_name_str = to_arcadia_string(type_name)
-        if type_name == 'ShapValues' and dereference(self.__model).ObliviousTrees.ApproxDimension > 1:
+
+        cdef EFstrType fstr_type = string_to_fstr_type(type_name)
+        cdef EPreCalcShapValues shap_mode = string_to_shap_mode(shap_mode_name)
+
+        if type_name == 'ShapValues' and dereference(self.__model).GetDimensionsCount() > 1:
             with nogil:
                 fstr_multi = GetFeatureImportancesMulti(
-                    type_name_str,
+                    fstr_type,
                     dereference(self.__model),
                     dataProviderPtr,
                     thread_count,
+                    shap_mode,
                     verbose
                 )
             return _3d_vector_of_double_to_np_array(fstr_multi), native_feature_ids
         else:
             with nogil:
                 fstr = GetFeatureImportances(
-                    type_name_str,
+                    fstr_type,
                     dereference(self.__model),
                     dataProviderPtr,
                     thread_count,
+                    shap_mode,
                     verbose
                 )
             return _2d_vector_of_double_to_np_array(fstr), native_feature_ids
@@ -2568,7 +2937,7 @@ cdef class _CatBoost:
         return self.__model.IsOblivious()
 
     cpdef _base_drop_unused_features(self):
-        self.__model.ObliviousTrees.DropUnusedFeatures()
+        self.__model.ObliviousTrees.GetMutable().DropUnusedFeatures()
 
     cpdef _load_model(self, model_file, format):
         cdef TFullModel tmp_model
@@ -2618,6 +2987,11 @@ cdef class _CatBoost:
         except Exception as e:
             return {}
 
+    cpdef _get_plain_params(self):
+        hasCatFeatures = len(self._get_cat_feature_indices()) != 0
+        cdef TJsonValue plainOptions = GetPlainJsonWithAllOptions(dereference(self.__model), hasCatFeatures)
+        return loads(to_native_str(ToString(plainOptions)))
+
     def _get_tree_count(self):
         return self.__model.GetTreeCount()
 
@@ -2650,7 +3024,7 @@ cdef class _CatBoost:
         return [to_native_str(s) for s in GetModelUsedFeaturesNames(dereference(self.__model))]
 
     def _get_class_names(self):
-        return [to_native_str(s) for s in GetModelClassNames(dereference(self.__model))]
+        return [to_native_str(s) for s in self.__model.GetModelClassNames()]
 
     cpdef _sum_models(self, models, weights, ctr_merge_policy):
         cdef TVector[TFullModel_const_ptr] models_vector
@@ -2667,6 +3041,205 @@ cdef class _CatBoost:
 
     cpdef _save_borders(self, output_file):
         SaveModelBorders( to_arcadia_string(output_file), dereference(self.__model))
+
+    cpdef _get_tree_splits(self, int tree_idx, _PoolBase pool):
+        cdef TVector[TString] splits = GetTreeSplitsDescriptions(
+            dereference(self.__model),
+            tree_idx,
+            pool.__pool if pool else TDataProviderPtr(),
+        )
+
+        node_descriptions = [to_native_str(s) for s in splits]
+        return node_descriptions
+
+    cpdef _get_tree_leaf_values(self, tree_idx, leaves_num):
+        leaf_values = GetTreeLeafValuesDescriptions(dereference(self.__model), tree_idx, leaves_num)
+        leaf_values_list = []
+
+        for value in leaf_values:
+            leaf_values_list.append(value)
+
+        return leaf_values_list
+
+    cpdef _tune_hyperparams(self, list grids_list, _PoolBase train_pool, dict params, int n_iter,
+                          int fold_count, int partition_random_seed, bool_t shuffle, bool_t stratified,
+                          double train_size, bool_t choose_by_train_test_split, bool_t return_cv_results,
+                          custom_folds, int verbose):
+
+        prep_params = _PreprocessParams(params)
+        prep_grids = _PreprocessGrids(grids_list)
+
+        self._reserve_test_evals(1)
+        self._clear_test_evals()
+
+        cdef TCrossValidationParams cvParams
+        cvParams.FoldCount = fold_count
+        cvParams.PartitionRandSeed = partition_random_seed
+        cvParams.Shuffle = shuffle
+        cvParams.Stratified = stratified
+        cvParams.Inverted = False
+
+        cdef TMaybe[TCustomTrainTestSubsets] custom_train_test_subset
+        if custom_folds is not None:
+            custom_train_test_subset = _make_train_test_subsets(train_pool, custom_folds)
+            cvParams.FoldCount = custom_train_test_subset.GetRef().first.size()
+            cvParams.customTrainSubsets = custom_train_test_subset.GetRef().first
+            cvParams.customTestSubsets = custom_train_test_subset.GetRef().second
+
+        cdef TTrainTestSplitParams ttParams
+        ttParams.PartitionRandSeed = partition_random_seed
+        ttParams.Shuffle = shuffle
+        ttParams.Stratified = False
+        ttParams.TrainPart = train_size
+
+        cdef TBestOptionValuesWithCvResult results
+        with nogil:
+            SetPythonInterruptHandler()
+            try:
+                if n_iter == -1:
+                    GridSearch(
+                        prep_grids.tree,
+                        prep_params.tree,
+                        ttParams,
+                        cvParams,
+                        prep_params.customObjectiveDescriptor,
+                        prep_params.customMetricDescriptor,
+                        train_pool.__pool,
+                        &results,
+                        choose_by_train_test_split,
+                        return_cv_results,
+                        verbose
+                    )
+                else:
+                    RandomizedSearch(
+                        n_iter,
+                        prep_grids.custom_rnd_dist_gens,
+                        prep_grids.tree,
+                        prep_params.tree,
+                        ttParams,
+                        cvParams,
+                        prep_params.customObjectiveDescriptor,
+                        prep_params.customMetricDescriptor,
+                        train_pool.__pool,
+                        &results,
+                        choose_by_train_test_split,
+                        return_cv_results,
+                        verbose
+                    )
+            finally:
+                ResetPythonInterruptHandler()
+        cv_results = defaultdict(list)
+        result_metrics = set()
+        for metric_idx in xrange(results.CvResult.size()):
+            name = to_native_str(results.CvResult[metric_idx].Metric)
+            if name in result_metrics:
+                continue
+            _prepare_cv_result(
+                name,
+                results.CvResult[metric_idx].Iterations,
+                results.CvResult[metric_idx].AverageTrain,
+                results.CvResult[metric_idx].StdDevTrain,
+                results.CvResult[metric_idx].AverageTest,
+                results.CvResult[metric_idx].StdDevTest,
+                cv_results
+            )
+            result_metrics.add(name)
+        best_params = {}
+        for key, value in results.BoolOptions:
+            best_params[key.decode('utf-8')] = value
+        for key, value in results.IntOptions:
+            best_params[key.decode('utf-8')] = value
+        for key, value in results.UIntOptions:
+            best_params[key.decode('utf-8')] = value
+        for key, value in results.DoubleOptions:
+            best_params[key.decode('utf-8')] = value
+        for key, value in results.StringOptions:
+            best_params[key.decode('utf-8')] = value.decode('utf-8')
+        search_result = {}
+        search_result["params"] = best_params
+        if return_cv_results:
+            search_result["cv_results"] = cv_results
+        return search_result
+
+    cpdef _get_binarized_statistics(self, _PoolBase pool, catFeaturesNums, floatFeaturesNums, predictionType, int thread_count):
+        thread_count = UpdateThreadCount(thread_count)
+        cdef TVector[TBinarizedFeatureStatistics] statistics
+        cdef TVector[size_t] catFeaturesNumsVec
+        cdef TVector[size_t] floatFeaturesNumsVec
+        for num in catFeaturesNums:
+            catFeaturesNumsVec.push_back(num)
+        for num in floatFeaturesNums:
+            floatFeaturesNumsVec.push_back(num)
+        statistics_vec = GetBinarizedStatistics(
+            dereference(self.__model),
+            dereference(pool.__pool.Get()),
+            catFeaturesNumsVec,
+            floatFeaturesNumsVec,
+            PyPredictionType(predictionType).predictionType,
+            thread_count
+        )
+        statistics_list = []
+        for stat in statistics_vec:
+            statistics_list.append(
+                {
+                    'borders': _vector_of_floats_to_np_array(stat.Borders),
+                    'binarized_feature': _vector_of_ints_to_np_array(stat.BinarizedFeature),
+                    'mean_target': _vector_of_floats_to_np_array(stat.MeanTarget),
+                    'mean_prediction': _vector_of_floats_to_np_array(stat.MeanPrediction),
+                    'objects_per_bin': _vector_of_size_t_to_np_array(stat.ObjectsPerBin),
+                    'predictions_on_varying_feature': _vector_of_double_to_np_array(stat.PredictionsOnVaryingFeature)
+                }
+            )
+        return statistics_list
+
+    cpdef _calc_cat_feature_perfect_hash(self, value, size_t featureNum):
+        return GetCatFeaturePerfectHash(dereference(self.__model), to_arcadia_string(value), featureNum)
+
+    cpdef _get_feature_type_and_internal_index(self, int flatFeatureIndex):
+        cdef TFeatureTypeAndInternalIndex typeAndIndex = GetFeatureTypeAndInternalIndex(
+            dereference(self.__model), flatFeatureIndex)
+        if typeAndIndex.Type == EFeatureType_Float:
+            return 'float', typeAndIndex.Index
+        elif typeAndIndex.Type == EFeatureType_Categorical:
+            return 'categorical', typeAndIndex.Index
+        else:
+            return 'unknown', -1
+
+    cpdef _get_cat_feature_values(self, _PoolBase pool, size_t flatFeatureIndex):
+        cdef TVector[TString] values = GetCatFeatureValues(
+            dereference(pool.__pool.Get()),
+            flatFeatureIndex)
+        res = {to_native_str(val) for val in values}
+        return res
+
+    cpdef _get_leaf_values(self):
+        return _vector_of_double_to_np_array(self.__model.ObliviousTrees.Get().LeafValues)
+
+    cpdef _get_leaf_weights(self):
+        result = np.empty(self.__model.ObliviousTrees.Get().LeafValues.size(), dtype=_npfloat64)
+        cdef size_t curr_index = 0
+        cdef TConstArrayRef[double] arrayView
+        for i in xrange(self.__model.ObliviousTrees.Get().LeafWeights.size()):
+            arrayView = <TConstArrayRef[double]>self.__model.ObliviousTrees.Get().LeafWeights[i]
+            for val in arrayView:
+                result[curr_index] = val
+                curr_index += 1
+        assert curr_index == 0 or curr_index == self.__model.ObliviousTrees.Get().LeafValues.size(), (
+            "wrong number of leaf weights")
+        return result
+
+    cpdef _get_tree_leaf_counts(self):
+        return _vector_of_uints_to_np_array(self.__model.ObliviousTrees.Get().GetTreeLeafCounts())
+
+    cpdef _set_leaf_values(self, new_leaf_values):
+        assert isinstance(new_leaf_values, np.ndarray), "expected numpy.ndarray."
+        assert new_leaf_values.dtype == np.float64, "leaf values should have type np.float64 (double)."
+        assert len(new_leaf_values.shape) == 1, "leaf values should be a 1d-vector."
+        assert new_leaf_values.shape[0] == self.__model.ObliviousTrees.Get().LeafValues.size(), (
+            "count of leaf values should be equal to the leaf count.")
+        cdef TArrayRef[double] model_leafs = <TArrayRef[double]>self.__model.ObliviousTrees.GetMutable().LeafValues
+        for i in xrange(self.__model.ObliviousTrees.Get().LeafValues.size()):
+            model_leafs[i] = new_leaf_values[i]
 
 
 cdef class _MetadataHashProxy:
@@ -2722,9 +3295,79 @@ cdef class _MetadataHashProxy:
         return ((to_native_str(kv.first), to_native_str(kv.second)) for kv in self._catboost.__model.ModelInfo)
 
 
+cdef TCustomTrainTestSubsets _make_train_test_subsets(_PoolBase pool, folds) except *:
+    num_data = pool.num_row()
+
+    if not hasattr(folds, '__iter__') and not hasattr(folds, 'split'):
+        raise AttributeError("folds should be a generator or iterator of (train_idx, test_idx) tuples "
+                             "or scikit-learn splitter object with split method")
+
+    group_info = pool.get_group_id()
+
+    if hasattr(folds, 'split'):
+        if group_info is not None:
+            flatted_group = group_info
+        else:
+            flatted_group = np.zeros(num_data, dtype=int)
+        folds = folds.split(X=np.zeros(num_data), y=pool.get_label(), groups=flatted_group)
+
+    cdef TVector[TVector[ui32]] custom_train_subsets
+    cdef TVector[TVector[ui32]] custom_test_subsets
+
+    if group_info is None:
+        for train_test in folds:
+            train = train_test[0]
+            test = train_test[1]
+
+            custom_train_subsets.emplace_back()
+            for subset in train:
+                custom_train_subsets.back().push_back(subset)
+
+            custom_test_subsets.emplace_back()
+            for subset in test:
+                custom_test_subsets.back().push_back(subset)
+    else:
+        map_group_id_to_group_number = {}
+        current_num = 0
+        for idx in range(len(group_info)):
+            if idx == 0 or group_info[idx] != group_info[idx - 1]:
+                map_group_id_to_group_number[group_info[idx]] = current_num
+                current_num = current_num + 1
+
+        for train_test in folds:
+            train = train_test[0]
+            test = train_test[1]
+
+            train_group = []
+
+            custom_train_subsets.emplace_back()
+
+            for idx in range(len(train)):
+                current_group = group_info[train[idx]]
+                if idx == 0 or current_group != group_info[train[idx - 1]]:
+                    custom_train_subsets.back().push_back(map_group_id_to_group_number[current_group])
+                    train_group.append(map_group_id_to_group_number[current_group])
+
+            custom_test_subsets.emplace_back()
+
+            for idx in range(len(test)):
+                current_group = group_info[test[idx]]
+
+                if map_group_id_to_group_number[current_group] in train_group:
+                    raise CatBoostError('Objects with the same group id must be in the same fold.')
+
+                if idx == 0 or current_group != group_info[test[idx - 1]]:
+                    custom_test_subsets.back().push_back(map_group_id_to_group_number[current_group])
+
+    cdef TCustomTrainTestSubsets result
+    result.first = custom_train_subsets
+    result.second = custom_test_subsets
+
+    return result
+
+
 cpdef _cv(dict params, _PoolBase pool, int fold_count, bool_t inverted, int partition_random_seed,
-          bool_t shuffle, bool_t stratified, bool_t as_pandas, double max_time_spent_on_fixed_cost_ratio,
-          int dev_max_iterations_batch_size):
+          bool_t shuffle, bool_t stratified, bool_t as_pandas, folds):
     prep_params = _PreprocessParams(params)
     cdef TCrossValidationParams cvParams
     cdef TVector[TCVResult] results
@@ -2734,14 +3377,20 @@ cpdef _cv(dict params, _PoolBase pool, int fold_count, bool_t inverted, int part
     cvParams.Shuffle = shuffle
     cvParams.Stratified = stratified
     cvParams.Inverted = inverted
-    cvParams.MaxTimeSpentOnFixedCostRatio = max_time_spent_on_fixed_cost_ratio
-    cvParams.DevMaxIterationsBatchSize = <ui32>dev_max_iterations_batch_size
+
+    cdef TMaybe[TCustomTrainTestSubsets] custom_train_test_subset
+    if folds is not None:
+        custom_train_test_subset = _make_train_test_subsets(pool, folds)
+        cvParams.FoldCount = custom_train_test_subset.GetRef().first.size()
+        cvParams.customTrainSubsets = custom_train_test_subset.GetRef().first
+        cvParams.customTestSubsets = custom_train_test_subset.GetRef().second
 
     with nogil:
         SetPythonInterruptHandler()
         try:
             CrossValidate(
                 prep_params.tree,
+                TQuantizedFeaturesInfoPtr(<TQuantizedFeaturesInfo*>nullptr),
                 prep_params.customObjectiveDescriptor,
                 prep_params.customMetricDescriptor,
                 pool.__pool,
@@ -2750,35 +3399,25 @@ cpdef _cv(dict params, _PoolBase pool, int fold_count, bool_t inverted, int part
         finally:
             ResetPythonInterruptHandler()
 
-    result = defaultdict(list)
-    metric_count = results.size()
-    used_metric_names = set()
-    for metric_idx in xrange(metric_count):
-        metric_name = to_native_str(results[metric_idx].Metric.c_str())
-        if metric_name in used_metric_names:
+    cv_results = defaultdict(list)
+    result_metrics = set()
+    for metric_idx in xrange(results.size()):
+        name = to_native_str(results[metric_idx].Metric)
+        if name in result_metrics:
             continue
-        used_metric_names.add(metric_name)
-
-        fill_iterations_column = 'iterations' not in result
-        if fill_iterations_column:
-            result['iterations'] = list()
-        for it in xrange(results[metric_idx].Iterations.size()):
-            iteration = results[metric_idx].Iterations[it]
-            if fill_iterations_column:
-                result['iterations'].append(iteration)
-            else:
-                # ensure that all metrics have the same iterations specified
-                assert(result['iterations'][it] == iteration)
-            result["test-" + metric_name + "-mean"].append(results[metric_idx].AverageTest[it])
-            result["test-" + metric_name + "-std"].append(results[metric_idx].StdDevTest[it])
-
-            if results[metric_idx].AverageTrain.size() != 0:
-                result["train-" + metric_name + "-mean"].append(results[metric_idx].AverageTrain[it])
-                result["train-" + metric_name + "-std"].append(results[metric_idx].StdDevTrain[it])
-
+        _prepare_cv_result(
+            name,
+            results[metric_idx].Iterations,
+            results[metric_idx].AverageTrain,
+            results[metric_idx].StdDevTrain,
+            results[metric_idx].AverageTest,
+            results[metric_idx].StdDevTest,
+            cv_results
+        )
+        result_metrics.add(name)
     if as_pandas:
-        return pd.DataFrame.from_dict(result)
-    return result
+        return pd.DataFrame.from_dict(cv_results)
+    return cv_results
 
 
 cdef _FloatOrStringFromString(char* s):
@@ -2857,6 +3496,29 @@ cdef class _StagedPredictIterator:
 
         return _convert_to_visible_labels(self.predictionType, self.__pred, self.thread_count, self.__model)
 
+cdef class _LeafIndexIterator:
+    cdef TLeafIndexCalcerOnPool* __leafIndexCalcer
+
+    cdef _initialize(self, TFullModel* model, _PoolBase pool, int ntree_start, int ntree_end):
+        self.__leafIndexCalcer = new TLeafIndexCalcerOnPool(
+            dereference(model),
+            pool.__pool.Get()[0].ObjectsData,
+            ntree_start,
+            ntree_end
+        )
+
+    def __dealloc__(self):
+        del self.__leafIndexCalcer
+
+    def __deepcopy__(self, _):
+        raise CatBoostError('Can\'t deepcopy _LeafIndexIterator object')
+
+    def next(self):
+        if not dereference(self.__leafIndexCalcer).CanGet():
+            raise StopIteration
+        result = _vector_of_uints_to_np_array(dereference(self.__leafIndexCalcer).Get())
+        dereference(self.__leafIndexCalcer).Next()
+        return result
 
 class MetricDescription:
 
@@ -2964,7 +3626,7 @@ cdef class _MetricCalcerBase:
         raise CatBoostError('Can\'t deepcopy _MetricCalcerBase object')
 
 
-cpdef _eval_metric_util(label_param, approx_param, metric, weight_param, group_id_param, thread_count):
+cpdef _eval_metric_util(label_param, approx_param, metric, weight_param, group_id_param, subgroup_id_param, pairs_param, thread_count):
     if (len(label_param) != len(approx_param[0])):
         raise CatBoostError('Label and approx should have same sizes.')
     doc_count = len(label_param);
@@ -3001,9 +3663,26 @@ cpdef _eval_metric_util(label_param, approx_param, metric, weight_param, group_i
             get_id_object_bytes_string_representation(group_id_param[i], &group_id_strbuf)
             group_id[i] = CalcGroupIdFor(<TStringBuf>group_id_strbuf)
 
+    cdef TString subgroup_id_strbuf
+
+    cdef TVector[TSubgroupId] subgroup_id;
+    if subgroup_id_param is not None:
+        if (len(subgroup_id_param) != doc_count):
+            raise CatBoostError('Label and subgroup_id should have same sizes.')
+        subgroup_id.resize(doc_count)
+        for i in range(doc_count):
+            get_id_object_bytes_string_representation(subgroup_id_param[i], &subgroup_id_strbuf)
+            subgroup_id[i] = CalcSubgroupIdFor(<TStringBuf>subgroup_id_strbuf)
+
+    cdef TVector[TPair] pairs;
+    if pairs_param is not None:
+        pairs.resize(len(pairs_param))
+        for i in range(len(pairs_param)):
+            pairs[i] = TPair(pairs_param[i][0], pairs_param[i][1], 1)
+
     thread_count = UpdateThreadCount(thread_count);
 
-    return EvalMetricsForUtils(label, approx, to_arcadia_string(metric), weight, group_id, thread_count)
+    return EvalMetricsForUtils(label, approx, to_arcadia_string(metric), weight, group_id, subgroup_id, pairs, thread_count)
 
 
 cpdef _get_roc_curve(model, pools_list, thread_count):
@@ -3096,8 +3775,32 @@ cpdef is_classification_objective(loss_name):
     return IsClassificationObjective(to_arcadia_string(loss_name))
 
 
+cpdef is_cv_stratified_objective(loss_name):
+    return IsCvStratifiedObjective(to_arcadia_string(loss_name))
+
+
 cpdef is_regression_objective(loss_name):
     return IsRegressionObjective(to_arcadia_string(loss_name))
+
+
+cpdef is_groupwise_metric(metric_name):
+    return IsGroupwiseMetric(to_arcadia_string(metric_name))
+
+
+cpdef is_multiclass_metric(metric_name):
+    return IsMultiClassCompatibleMetric(to_arcadia_string(metric_name))
+
+
+cpdef is_pairwise_metric(metric_name):
+    return IsPairwiseMetric(to_arcadia_string(metric_name))
+
+
+cpdef is_minimizable_metric(metric_name):
+    return IsMinOptimal(to_arcadia_string(metric_name))
+
+
+cpdef is_maximizable_metric(metric_name):
+    return IsMaxOptimal(to_arcadia_string(metric_name))
 
 
 cpdef _check_train_params(dict params):
@@ -3106,6 +3809,8 @@ cpdef _check_train_params(dict params):
         del params_to_check['cat_features']
     if 'input_borders' in params_to_check:
         del params_to_check['input_borders']
+    if 'ignored_features' in params_to_check:
+        del params_to_check['ignored_features']
 
     prep_params = _PreprocessParams(params_to_check)
     CheckFitParams(
@@ -3120,3 +3825,45 @@ cpdef _get_gpu_device_count():
 
 cpdef _reset_trace_backend(file):
     ResetTraceBackend(to_arcadia_string(file))
+
+
+@cython.embedsignature(True)
+cdef class TargetStats:
+    cdef TTargetStats TargetStats
+
+    def __init__(self, float min_value, float max_value):
+        self.TargetStats.MinValue = min_value
+        self.TargetStats.MaxValue = max_value
+
+
+@cython.embedsignature(True)
+cdef class DataMetaInfo:
+    cdef TDataMetaInfo DataMetaInfo
+
+    def __init__(
+        self,
+        ui64 object_count,
+        ui32 feature_count,
+        ui64 max_cat_features_uniq_values_on_learn,
+        TargetStats target_stats,
+        bool_t has_pairs
+    ):
+        self.DataMetaInfo.ObjectCount = object_count
+        self.DataMetaInfo.MaxCatFeaturesUniqValuesOnLearn = max_cat_features_uniq_values_on_learn
+        if target_stats is not None:
+            self.DataMetaInfo.TargetStats = target_stats.TargetStats
+        self.DataMetaInfo.HasPairs = has_pairs
+        self.DataMetaInfo.FeaturesLayout = MakeHolder[TFeaturesLayout](feature_count).Release()
+
+
+@cython.embedsignature(True)
+cpdef compute_training_options(dict options, DataMetaInfo train_meta_info, DataMetaInfo test_meta_info=None):
+    cdef TMaybe[TDataMetaInfo] testMetaInfo
+    if test_meta_info is not None:
+        testMetaInfo = test_meta_info.DataMetaInfo
+    cdef TJsonValue trainingOptions = GetTrainingOptions(
+        _PreprocessParams(options).tree,
+        train_meta_info.DataMetaInfo,
+        testMetaInfo
+    )
+    return loads(to_native_str(ToString(trainingOptions)))

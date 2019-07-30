@@ -1,5 +1,7 @@
+#include "decl.h"
+#include "pmml.h"
 
-#include "onnx.h"
+#include <contrib/libs/onnx/proto/onnx_ml.pb.h>
 
 #include <catboost/libs/model/model.h>
 #include <catboost/libs/logging/logging.h>
@@ -10,6 +12,7 @@
 
 
 using namespace NCB;
+
 
 
 struct TSubmodelComparison {
@@ -80,21 +83,33 @@ TFullModel ReadModelAny(const TString& fileName) {
     return model;
 }
 
-static bool CompareModelInfo(const THashMap<TString, TString>& modelInfo1, const THashMap<TString, TString>& modelInfo2) {
+static bool CompareModelInfo(const THashMap<TString, TString>& modelInfo1, const THashMap<TString, TString>& modelInfo2, bool verbose=false) {
     if (modelInfo1.size() != modelInfo2.size()) {
+        if (verbose) {
+            Clog << " Different modelInfo size: " << modelInfo1.size() << " vs " << modelInfo2.size() << Endl;
+        }
         return false;
     }
     for (const auto& key1: modelInfo1) {
         const auto& key2 = modelInfo2.find(key1.first);
         if (key2 == modelInfo2.end()) {
+            if (verbose) {
+                Clog << " Key1 not found in modelInfo2: " << key1.first << Endl;
+            }
             return false;
         }
         if (key1.first != "params") {
             if (key1 != *key2) {
+                if (verbose) {
+                    Clog << " Values differ for key " << key1.first << ": " << key1.second << " vs " << key2->second << Endl;
+                }
                 return false;
             }
         } else {
             if (ReadTJsonValue(key1.second) != ReadTJsonValue(key2->second)) {
+                if (verbose) {
+                    Clog << " Value of `params` differ: " << ReadTJsonValue(key1.second) << " vs " << ReadTJsonValue(key2->second) << Endl;
+                }
                 return false;
             }
         }
@@ -103,14 +118,52 @@ static bool CompareModelInfo(const THashMap<TString, TString>& modelInfo1, const
 }
 
 
+// returns Nothing() if both lhs and rhs are not of TModel type
+template <class TModel>
+TMaybe<int> ProcessSubType(const TStringBuf modelTypeName, const TStringBuf modelPath1, const TStringBuf modelPath2) {
+    TMaybe<TModel> model1 = TryLoadModel<TModel>(modelPath1);
+    TMaybe<TModel> model2 = TryLoadModel<TModel>(modelPath2);
+
+    if (model1 && model2) {
+        TString diffString;
+        bool modelsAreEqual = CompareModels<TModel>(*model1, *model2, &diffString);
+        if (modelsAreEqual) {
+            Clog << "Models are equal" << Endl;
+            return 0;
+        }
+        Clog << modelTypeName << " models differ:\n" << diffString << Endl
+             << "MODEL1 = " << modelPath1 << Endl
+             << "MODEL2 = " << modelPath2 << Endl;
+        return 1;
+    }
+    if (model1 && !model2) {
+        Clog << "Cannot compare (not implemented)\n"
+            << modelTypeName << " MODEL1 = " << modelPath1 << Endl
+            << "non-" << modelTypeName << " MODEL2 = " << modelPath2 << Endl;
+        return 2;
+    }
+    if (!model1 && model2) {
+        Clog << "Cannot compare (not implemented)\n"
+            << "non-" << modelTypeName << " MODEL1 = " << modelPath1 << Endl
+            << modelTypeName << " MODEL2 = " << modelPath2 << Endl;
+        return 2;
+    }
+
+    return Nothing();
+}
+
+
 int main(int argc, char** argv) {
     using namespace NLastGetopt;
     double diffLimit = 0.0;
+    bool verbose = false;
     TOpts opts = NLastGetopt::TOpts::Default();
     opts.AddLongOption("diff-limit").RequiredArgument("THR")
         .Help("Tolerate elementwise relative difference less than THR")
         .DefaultValue(0.0)
         .StoreResult(&diffLimit);
+    opts.AddLongOption("verbose")
+        .StoreTrue(&verbose);
     opts.SetFreeArgsMin(2);
     opts.SetFreeArgsMax(2);
     opts.SetFreeArgTitle(0, "MODEL1");
@@ -118,36 +171,17 @@ int main(int argc, char** argv) {
     TOptsParseResult args(&opts, argc, argv);
     TVector<TString> freeArgs = args.GetFreeArgs();
 
-
-    TMaybe<onnx::ModelProto> onnxModel1 = TryLoadOnnxModel(freeArgs[0]);
-    TMaybe<onnx::ModelProto> onnxModel2 = TryLoadOnnxModel(freeArgs[1]);
-
-    if (onnxModel1 && onnxModel2) {
-        TString diffString;
-        bool modelsAreEqual = Compare(*onnxModel1, *onnxModel2, &diffString);
-        if (modelsAreEqual) {
-            Clog << "Models are equal" << Endl;
-            return 0;
-        }
-        Clog << "ONNX models differ:\n" << diffString << Endl
-             << "MODEL1 = " << freeArgs[0] << Endl
-             << "MODEL2 = " << freeArgs[1] << Endl;
-        return 1;
-    }
-    if (onnxModel1 && !onnxModel2) {
-        Clog << "Cannot compare (not implemented)\n"
-            << "ONNX MODEL1 = " << freeArgs[0] << Endl
-            << "non-ONNX MODEL2 = " << freeArgs[1] << Endl;
-        return 2;
-    }
-    if (!onnxModel1 && onnxModel2) {
-        Clog << "Cannot compare (not implemented)\n"
-            << "non-ONNX MODEL1 = " << freeArgs[0] << Endl
-            << "ONNX MODEL2 = " << freeArgs[1] << Endl;
-        return 2;
+    TMaybe<int> subTypeResult = ProcessSubType<onnx::ModelProto>("ONNX", freeArgs[0], freeArgs[1]);
+    if (subTypeResult) {
+        return *subTypeResult;
     }
 
-    // both models are non-ONNX - compare loaded as TFullModel
+    subTypeResult = ProcessSubType<TPmmlModel>("PMML", freeArgs[0], freeArgs[1]);
+    if (subTypeResult) {
+        return *subTypeResult;
+    }
+
+    // both models are non-ONNX and non-PMML - compare loaded as TFullModel
 
     TFullModel model1 = ReadModelAny(freeArgs[0]);
     TFullModel model2 = ReadModelAny(freeArgs[1]);
@@ -156,8 +190,8 @@ int main(int argc, char** argv) {
         return 0;
     }
     TSubmodelComparison result;
-    const TObliviousTrees& trees1 = model1.ObliviousTrees;
-    const TObliviousTrees& trees2 = model2.ObliviousTrees;
+    const TObliviousTrees& trees1 = *model1.ObliviousTrees;
+    const TObliviousTrees& trees2 = *model2.ObliviousTrees;
     if (true) {
         if (trees1.FloatFeatures.size() != trees2.FloatFeatures.size()) {
             Clog << "FloatFeatures size differ: "
@@ -252,7 +286,7 @@ int main(int argc, char** argv) {
             result.StructureIsDifferent = true;
         }
     }
-    if (!CompareModelInfo(model1.ModelInfo, model2.ModelInfo)) {
+    if (!CompareModelInfo(model1.ModelInfo, model2.ModelInfo, verbose)) {
         Clog << "ModelInfo differ" << Endl;
         model1.ModelInfo = THashMap<TString, TString>();
         model2.ModelInfo = THashMap<TString, TString>();

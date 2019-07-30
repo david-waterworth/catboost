@@ -100,7 +100,7 @@ namespace NCatboostCuda {
     }
 
     IGpuMetric::IGpuMetric(const NCatboostOptions::TLossDescription& description, ui32 approxDim)
-        : CpuMetric(std::move(CreateDefaultMetricForObjective(description, approxDim)[0]))
+        : CpuMetric(std::move(CreateMetricFromDescription(description, approxDim)[0]))
         , MetricDescription(description)
     {
     }
@@ -174,7 +174,7 @@ namespace NCatboostCuda {
             switch (metricType) {
                 case ELossFunction::Logloss:
                 case ELossFunction::CrossEntropy: {
-                    float border = GetDefaultClassificationBorder();
+                    float border = GetDefaultTargetBorder();
                     bool useBorder = false;
                     auto tmp = TVec::Create(cursor.GetMapping().RepeatOnAllDevices(1));
                     if (metricType == ELossFunction::Logloss) {
@@ -209,7 +209,8 @@ namespace NCatboostCuda {
                 case ELossFunction::Lq:
                 case ELossFunction::NumErrors:
                 case ELossFunction::MAPE:
-                case ELossFunction::Poisson: {
+                case ELossFunction::Poisson:
+                case ELossFunction::Expectile: {
                     float alpha = 0.5;
                     auto tmp = TVec::Create(cursor.GetMapping().RepeatOnAllDevices(1));
                     //TODO(noxoomo): make param dispatch on device side
@@ -241,14 +242,14 @@ namespace NCatboostCuda {
                     MultiLogitValueAndDer(target, weights, cursor, (const TCudaBuffer<ui32, TMapping>*)nullptr,
                                           NumClasses, &tmp, (TVec*)nullptr);
                     const double sum = ReadReduce(tmp)[0];
-                    return MakeSimpleAdditiveStatistic(sum, totalWeight);
+                    return MakeSimpleAdditiveStatistic(-sum, totalWeight);
                 }
                 case ELossFunction::MultiClassOneVsAll: {
                     auto tmp = TVec::Create(cursor.GetMapping().RepeatOnAllDevices(1));
                     MultiClassOneVsAllValueAndDer(target, weights, cursor, (const TCudaBuffer<ui32, TMapping>*)nullptr,
                                                   NumClasses, &tmp, (TVec*)nullptr);
                     const double sum = ReadReduce(tmp)[0];
-                    return MakeSimpleAdditiveStatistic(sum, totalWeight);
+                    return MakeSimpleAdditiveStatistic(-sum, totalWeight);
                 }
                 case ELossFunction::MCC: {
                     return BuildConfusionMatrixAtPoint(target, weights, cursor, NumClasses, cache);
@@ -495,7 +496,8 @@ namespace NCatboostCuda {
             case ELossFunction::Accuracy:
             case ELossFunction::ZeroOneLoss:
             case ELossFunction::NumErrors:
-            case ELossFunction::Poisson: {
+            case ELossFunction::Poisson:
+            case ELossFunction::Expectile: {
                 result.push_back(new TGpuPointwiseMetric(metricDescription, approxDim));
                 break;
             }
@@ -547,7 +549,7 @@ namespace NCatboostCuda {
             }
 
             case ELossFunction::HammingLoss: {
-                double border = GetDefaultClassificationBorder();
+                double border = GetDefaultTargetBorder();
                 const auto& params = metricDescription.GetLossParams();
                 if (params.contains("border")) {
                     border = FromString<float>(params.at("border"));
@@ -586,7 +588,6 @@ namespace NCatboostCuda {
                 }
                 break;
             }
-            case ELossFunction::NDCG:
             case ELossFunction::QueryRMSE:
             case ELossFunction::QuerySoftMax:
             case ELossFunction::PairLogit:
@@ -610,40 +611,41 @@ namespace NCatboostCuda {
         return result;
     }
 
-    TVector<THolder<IGpuMetric>> CreateGpuMetrics(const NCatboostOptions::TOption<NCatboostOptions::TLossDescription>& lossFunctionOption,
-                                                  const NCatboostOptions::TOption<NCatboostOptions::TMetricOptions>& evalMetricOptions,
+    TVector<THolder<IGpuMetric>> CreateGpuMetrics(const NCatboostOptions::TOption<NCatboostOptions::TMetricOptions>& metricOptions,
                                                   ui32 cpuApproxDim) {
         TVector<THolder<IGpuMetric>> metrics;
         THashSet<TString> usedDescriptions;
 
-        if (evalMetricOptions->EvalMetric.IsSet()) {
-            if (evalMetricOptions->EvalMetric->GetLossFunction() == ELossFunction::PythonUserDefinedPerObject) {
+        if (metricOptions->EvalMetric.IsSet()) {
+            if (metricOptions->EvalMetric->GetLossFunction() == ELossFunction::PythonUserDefinedPerObject) {
                 CB_ENSURE(false, "Error: GPU doesn't support custom metrics");
             } else {
-                TVector<THolder<IGpuMetric>> createdMetrics = CreateGpuMetricFromDescription(lossFunctionOption->GetLossFunction(),
-                                                                                             evalMetricOptions->EvalMetric,
+                TVector<THolder<IGpuMetric>> createdMetrics = CreateGpuMetricFromDescription(metricOptions->ObjectiveMetric->GetLossFunction(),
+                                                                                             metricOptions->EvalMetric,
                                                                                              cpuApproxDim);
-                CB_ENSURE(createdMetrics.size() == 1, "Eval metric should have a single value. Metric " << ToString(evalMetricOptions->EvalMetric->GetLossFunction()) << " provides a value for each class, thus it cannot be used as "
+                CB_ENSURE(createdMetrics.size() == 1, "Eval metric should have a single value. Metric " << ToString(metricOptions->EvalMetric->GetLossFunction()) << " provides a value for each class, thus it cannot be used as "
                                                                                                         << "a single value to select best iteration or to detect overfitting. "
                                                                                                         << "If you just want to look on the values of this metric use custom_metric parameter.");
                 metrics.push_back(std::move(createdMetrics.front()));
-                usedDescriptions.insert(metrics.back()->GetCpuMetric().GetDescription());
             }
         }
 
-        CB_ENSURE(lossFunctionOption->GetLossFunction() != ELossFunction::PythonUserDefinedPerObject, "Error: GPU doesn't support user-defined loss");
+        CB_ENSURE(metricOptions->ObjectiveMetric->GetLossFunction() != ELossFunction::PythonUserDefinedPerObject, "Error: GPU doesn't support user-defined loss");
 
-        for (auto&& metric : CreateGpuMetricFromDescription(lossFunctionOption->GetLossFunction(),
-                                                            lossFunctionOption, cpuApproxDim)) {
+        for (auto&& metric : CreateGpuMetricFromDescription(metricOptions->ObjectiveMetric->GetLossFunction(),
+                                                            metricOptions->ObjectiveMetric, cpuApproxDim)) {
             const TString& description = metric->GetCpuMetric().GetDescription();
             if (!usedDescriptions.contains(description)) {
                 usedDescriptions.insert(description);
                 metrics.push_back(std::move(metric));
+                if (!metrics.back()->GetUseWeights().IsIgnored()) {
+                    metrics.back()->GetUseWeights().SetDefaultValue(true);
+                }
             }
         }
 
-        for (const auto& description : evalMetricOptions->CustomMetrics.Get()) {
-            for (auto&& metric : CreateGpuMetricFromDescription(lossFunctionOption->GetLossFunction(),
+        for (const auto& description : metricOptions->CustomMetrics.Get()) {
+            for (auto&& metric : CreateGpuMetricFromDescription(metricOptions->ObjectiveMetric->GetLossFunction(),
                                                                 description, cpuApproxDim)) {
                 const TString& description = metric->GetCpuMetric().GetDescription();
                 if (!usedDescriptions.contains(description)) {

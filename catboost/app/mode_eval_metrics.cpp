@@ -15,7 +15,7 @@
 #include <library/getopt/small/last_getopt_opts.h>
 
 #include <util/folder/tempdir.h>
-#include <util/string/iterator.h>
+#include <util/string/split.h>
 #include <util/system/compiler.h>
 
 
@@ -130,10 +130,10 @@ int mode_eval_metrics(int argc, const char* argv[]) {
     TFullModel model = ReadModel(params.ModelFileName, params.ModelFormat);
     CB_ENSURE(model.GetUsedCatFeaturesCount() == 0 || params.DsvPoolFormatParams.CdFilePath.Inited(),
               "Model has categorical features. Specify column_description file with correct categorical features.");
-    params.ClassNames = GetModelClassNames(model);
+    params.ClassNames = model.GetModelClassNames();
 
     if (plotParams.EndIteration == 0) {
-        plotParams.EndIteration = model.ObliviousTrees.TreeSizes.size();
+        plotParams.EndIteration = model.GetTreeCount();
     }
     if (plotParams.TmpDir == "-") {
         plotParams.TmpDir = TTempDir().Name();
@@ -145,7 +145,7 @@ int mode_eval_metrics(int argc, const char* argv[]) {
     TRestorableFastRng64 rand(0);
 
     auto metricDescriptions = CreateMetricDescriptions(plotParams.MetricsDescription);
-    auto metrics = CreateMetrics(metricDescriptions, model.ObliviousTrees.ApproxDimension);
+    auto metrics = CreateMetrics(metricDescriptions, model.GetDimensionsCount());
 
     TMetricsPlotCalcer plotCalcer = CreateMetricCalcer(
         model,
@@ -153,9 +153,9 @@ int mode_eval_metrics(int argc, const char* argv[]) {
         plotParams.EndIteration,
         plotParams.Step,
         /*processedIterationsStep=*/50, // TODO(nikitxskv): Make auto estimation of this parameter based on the free RAM and pool size.
-        executor,
         plotParams.TmpDir,
-        metrics
+        metrics,
+        &executor
     );
 
     TVector<TProcessedDataProvider> datasetParts;

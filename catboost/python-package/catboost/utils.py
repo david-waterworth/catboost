@@ -1,6 +1,8 @@
 from .core import Pool, CatBoostError, get_catboost_bin_module, ARRAY_TYPES
 from collections import defaultdict
+from contextlib import contextmanager
 import numpy as np
+import warnings
 
 _catboost = get_catboost_bin_module()
 _eval_metric_util = _catboost._eval_metric_util
@@ -8,6 +10,33 @@ _get_roc_curve = _catboost._get_roc_curve
 _select_threshold = _catboost._select_threshold
 
 compute_wx_test = _catboost.compute_wx_test
+TargetStats = _catboost.TargetStats
+DataMetaInfo = _catboost.DataMetaInfo
+compute_training_options = _catboost.compute_training_options
+
+
+@contextmanager
+def _import_matplotlib():
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as e:
+        warnings.warn("To draw plots you should install matplotlib.")
+        raise ImportError(str(e))
+    yield plt
+
+
+def _draw(plt, x, y, x_label, y_label, title):
+    plt.figure(figsize=(16, 8))
+
+    plt.plot(x, y, alpha=0.5, lw=2)
+
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
+    plt.grid(True)
+    plt.xlabel(x_label, fontsize=16)
+    plt.ylabel(y_label, fontsize=16)
+    plt.title(title, fontsize=20)
+    plt.show()
 
 
 def create_cd(
@@ -64,7 +93,7 @@ def create_cd(
             f.write('{}\t{}\t{}\n'.format(index, title, name))
 
 
-def eval_metric(label, approx, metric, weight=None, group_id=None, thread_count=-1):
+def eval_metric(label, approx, metric, weight=None, group_id=None, subgroup_id=None, pairs=None, thread_count=-1):
     """
     Evaluate metrics with raw approxes and labels.
 
@@ -85,6 +114,18 @@ def eval_metric(label, approx, metric, weight=None, group_id=None, thread_count=
     group_id : list or numpy.array or pandas.DataFrame or pandas.Series, optional (default=None)
         Object group ids.
 
+    subgroup_id : list or numpy.array, optional (default=None)
+        subgroup id for each instance.
+        If not None, giving 1 dimensional array like data.
+
+    pairs : list or numpy.array or pandas.DataFrame or string
+        The pairs description.
+        If list or numpy.arrays or pandas.DataFrame, giving 2 dimensional.
+        The shape should be Nx2, where N is the pairs' count. The first element of the pair is
+        the index of winner object in the training set. The second element of the pair is
+        the index of loser object in the training set.
+        If string, giving the path to the file with pairs description.
+
     thread_count : int, optional (default=-1)
         Number of threads to work with.
         If -1, then the number of threads is set to the number of CPU cores.
@@ -97,7 +138,7 @@ def eval_metric(label, approx, metric, weight=None, group_id=None, thread_count=
         approx = [[]]
     if not isinstance(approx[0], ARRAY_TYPES):
         approx = [approx]
-    return _eval_metric_util(label, approx, metric, weight, group_id, thread_count)
+    return _eval_metric_util(label, approx, metric, weight, group_id, subgroup_id, pairs, thread_count)
 
 
 def get_gpu_device_count():
@@ -108,7 +149,7 @@ def reset_trace_backend(filename):
     get_catboost_bin_module()._reset_trace_backend(filename)
 
 
-def get_roc_curve(model, data, thread_count=-1):
+def get_roc_curve(model, data, thread_count=-1, plot=False):
     """
     Build points of ROC curve.
 
@@ -124,6 +165,9 @@ def get_roc_curve(model, data, thread_count=-1):
         Number of threads to work with.
         If -1, then the number of threads is set to the number of CPU cores.
 
+    plot : bool, optional (default=False)
+        If True, draw curve.
+
     Returns
     -------
     curve points : tuple of three arrays (fpr, tpr, thresholds)
@@ -136,10 +180,16 @@ def get_roc_curve(model, data, thread_count=-1):
         if not isinstance(pool, Pool):
             raise CatBoostError('one of data pools is not catboost.Pool')
 
-    return _get_roc_curve(model._object, data, thread_count)
+    roc_curve = _get_roc_curve(model._object, data, thread_count)
+
+    if plot:
+        with _import_matplotlib() as plt:
+            _draw(plt, roc_curve[0], roc_curve[1], 'False Positive Rate', 'True Positive Rate', 'ROC Curve')
+
+    return roc_curve
 
 
-def get_fpr_curve(model=None, data=None, curve=None, thread_count=-1):
+def get_fpr_curve(model=None, data=None, curve=None, thread_count=-1, plot=False):
     """
     Build points of FPR curve.
 
@@ -159,6 +209,9 @@ def get_fpr_curve(model=None, data=None, curve=None, thread_count=-1):
         Number of threads to work with.
         If -1, then the number of threads is set to the number of CPU cores.
 
+    plot : bool, optional (default=False)
+        If True, draw curve.
+
     Returns
     -------
     curve points : tuple of two arrays (thresholds, fpr)
@@ -173,10 +226,15 @@ def get_fpr_curve(model=None, data=None, curve=None, thread_count=-1):
         if model is None or data is None:
             raise CatBoostError('model and data parameters should be set when curve parameter is None.')
         fpr, _, thresholds = get_roc_curve(model, data, thread_count)
+
+    if plot:
+        with _import_matplotlib() as plt:
+            _draw(plt, thresholds, fpr, 'Thresholds', 'False Positive Rate', 'FPR Curve')
+
     return thresholds, fpr
 
 
-def get_fnr_curve(model=None, data=None, curve=None, thread_count=-1):
+def get_fnr_curve(model=None, data=None, curve=None, thread_count=-1, plot=False):
     """
     Build points of FNR curve.
 
@@ -196,6 +254,9 @@ def get_fnr_curve(model=None, data=None, curve=None, thread_count=-1):
         Number of threads to work with.
         If -1, then the number of threads is set to the number of CPU cores.
 
+    plot : bool, optional (default=False)
+        If True, draw curve.
+
     Returns
     -------
     curve points : tuple of two arrays (thresholds, fnr)
@@ -211,6 +272,11 @@ def get_fnr_curve(model=None, data=None, curve=None, thread_count=-1):
             raise CatBoostError('model and data parameters should be set when curve parameter is None.')
         _, tpr, thresholds = get_roc_curve(model, data, thread_count)
     fnr = np.array([1 - x for x in tpr])
+
+    if plot:
+        with _import_matplotlib() as plt:
+            _draw(plt, thresholds, fnr, 'Thresholds', 'False Negative Rate', 'FNR Curve')
+
     return thresholds, fnr
 
 

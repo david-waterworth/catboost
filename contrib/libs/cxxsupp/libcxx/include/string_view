@@ -369,7 +369,7 @@ public:
     }
 
     _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
-    int compare(                       size_type __pos1, size_type __n1, 
+    int compare(                       size_type __pos1, size_type __n1,
                 basic_string_view __sv, size_type __pos2, size_type __n2) const
     {
         return substr(__pos1, __n1).compare(__sv.substr(__pos2, __n2));
@@ -579,7 +579,8 @@ public:
             (data(), size(), __s, __pos, traits_type::length(__s));
     }
 
-#if _LIBCPP_STD_VER > 17
+//WARN: disabled std guards in order to allow using these options without switching to new std
+//#if _LIBCPP_STD_VER > 17
     _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
     bool starts_with(basic_string_view __s) const _NOEXCEPT
     { return size() >= __s.size() && compare(0, __s.size(), __s) == 0; }
@@ -603,7 +604,7 @@ public:
     _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
     bool ends_with(const value_type* __s) const _NOEXCEPT
     { return ends_with(basic_string_view(__s)); }
-#endif
+//#endif
 
 private:
     const   value_type* __data;
@@ -622,7 +623,14 @@ bool operator==(basic_string_view<_CharT, _Traits> __lhs,
     return __lhs.compare(__rhs) == 0;
 }
 
+// Workaround for the bug in MSVC. Looks like MSVC generates the same
+// mangled name for this function as for the previous function. So we introduce
+// artificial difference to avoid that.
+#ifdef _LIBCPP_COMPILER_MSVC
+template<class _CharT, class _Traits, int = 1>
+#else
 template<class _CharT, class _Traits>
+#endif
 _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
 bool operator==(basic_string_view<_CharT, _Traits> __lhs,
                 typename common_type<basic_string_view<_CharT, _Traits> >::type __rhs) _NOEXCEPT
@@ -631,9 +639,13 @@ bool operator==(basic_string_view<_CharT, _Traits> __lhs,
     return __lhs.compare(__rhs) == 0;
 }
 
+#ifdef _LIBCPP_COMPILER_MSVC
+template<class _CharT, class _Traits, int = 2>
+#else
 template<class _CharT, class _Traits>
+#endif
 _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
-bool operator==(typename common_type<basic_string_view<_CharT, _Traits> >::type __lhs, 
+bool operator==(typename common_type<basic_string_view<_CharT, _Traits> >::type __lhs,
                 basic_string_view<_CharT, _Traits> __rhs) _NOEXCEPT
 {
     if ( __lhs.size() != __rhs.size()) return false;
@@ -651,7 +663,12 @@ bool operator!=(basic_string_view<_CharT, _Traits> __lhs, basic_string_view<_Cha
     return __lhs.compare(__rhs) != 0;
 }
 
+
+#ifdef _LIBCPP_COMPILER_MSVC
+template<class _CharT, class _Traits, int = 1>
+#else
 template<class _CharT, class _Traits>
+#endif
 _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
 bool operator!=(basic_string_view<_CharT, _Traits> __lhs,
                 typename common_type<basic_string_view<_CharT, _Traits> >::type __rhs) _NOEXCEPT
@@ -661,9 +678,13 @@ bool operator!=(basic_string_view<_CharT, _Traits> __lhs,
     return __lhs.compare(__rhs) != 0;
 }
 
+#ifdef _LIBCPP_COMPILER_MSVC
+template<class _CharT, class _Traits, int = 2>
+#else
 template<class _CharT, class _Traits>
+#endif
 _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
-bool operator!=(typename common_type<basic_string_view<_CharT, _Traits> >::type __lhs, 
+bool operator!=(typename common_type<basic_string_view<_CharT, _Traits> >::type __lhs,
                 basic_string_view<_CharT, _Traits> __rhs) _NOEXCEPT
 {
     if ( __lhs.size() != __rhs.size())
@@ -680,7 +701,11 @@ bool operator<(basic_string_view<_CharT, _Traits> __lhs, basic_string_view<_Char
     return __lhs.compare(__rhs) < 0;
 }
 
+#ifdef _LIBCPP_COMPILER_MSVC
+template<class _CharT, class _Traits, int = 1>
+#else
 template<class _CharT, class _Traits>
+#endif
 _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
 bool operator<(basic_string_view<_CharT, _Traits> __lhs,
                 typename common_type<basic_string_view<_CharT, _Traits> >::type __rhs) _NOEXCEPT
@@ -688,9 +713,13 @@ bool operator<(basic_string_view<_CharT, _Traits> __lhs,
     return __lhs.compare(__rhs) < 0;
 }
 
+#ifdef _LIBCPP_COMPILER_MSVC
+template<class _CharT, class _Traits, int = 2>
+#else
 template<class _CharT, class _Traits>
+#endif
 _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
-bool operator<(typename common_type<basic_string_view<_CharT, _Traits> >::type __lhs, 
+bool operator<(typename common_type<basic_string_view<_CharT, _Traits> >::type __lhs,
                 basic_string_view<_CharT, _Traits> __rhs) _NOEXCEPT
 {
     return __lhs.compare(__rhs) < 0;
@@ -705,7 +734,11 @@ bool operator> (basic_string_view<_CharT, _Traits> __lhs, basic_string_view<_Cha
     return __lhs.compare(__rhs) > 0;
 }
 
+#ifdef _LIBCPP_COMPILER_MSVC
+template<class _CharT, class _Traits, int = 1>
+#else
 template<class _CharT, class _Traits>
+#endif
 _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
 bool operator>(basic_string_view<_CharT, _Traits> __lhs,
                 typename common_type<basic_string_view<_CharT, _Traits> >::type __rhs) _NOEXCEPT
@@ -713,9 +746,13 @@ bool operator>(basic_string_view<_CharT, _Traits> __lhs,
     return __lhs.compare(__rhs) > 0;
 }
 
+#ifdef _LIBCPP_COMPILER_MSVC
+template<class _CharT, class _Traits, int = 2>
+#else
 template<class _CharT, class _Traits>
+#endif
 _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
-bool operator>(typename common_type<basic_string_view<_CharT, _Traits> >::type __lhs, 
+bool operator>(typename common_type<basic_string_view<_CharT, _Traits> >::type __lhs,
                 basic_string_view<_CharT, _Traits> __rhs) _NOEXCEPT
 {
     return __lhs.compare(__rhs) > 0;
@@ -730,7 +767,11 @@ bool operator<=(basic_string_view<_CharT, _Traits> __lhs, basic_string_view<_Cha
     return __lhs.compare(__rhs) <= 0;
 }
 
+#ifdef _LIBCPP_COMPILER_MSVC
+template<class _CharT, class _Traits, int = 1>
+#else
 template<class _CharT, class _Traits>
+#endif
 _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
 bool operator<=(basic_string_view<_CharT, _Traits> __lhs,
                 typename common_type<basic_string_view<_CharT, _Traits> >::type __rhs) _NOEXCEPT
@@ -738,9 +779,13 @@ bool operator<=(basic_string_view<_CharT, _Traits> __lhs,
     return __lhs.compare(__rhs) <= 0;
 }
 
+#ifdef _LIBCPP_COMPILER_MSVC
+template<class _CharT, class _Traits, int = 2>
+#else
 template<class _CharT, class _Traits>
+#endif
 _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
-bool operator<=(typename common_type<basic_string_view<_CharT, _Traits> >::type __lhs, 
+bool operator<=(typename common_type<basic_string_view<_CharT, _Traits> >::type __lhs,
                 basic_string_view<_CharT, _Traits> __rhs) _NOEXCEPT
 {
     return __lhs.compare(__rhs) <= 0;
@@ -756,7 +801,11 @@ bool operator>=(basic_string_view<_CharT, _Traits> __lhs, basic_string_view<_Cha
 }
 
 
+#ifdef _LIBCPP_COMPILER_MSVC
+template<class _CharT, class _Traits, int = 1>
+#else
 template<class _CharT, class _Traits>
+#endif
 _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
 bool operator>=(basic_string_view<_CharT, _Traits> __lhs,
                 typename common_type<basic_string_view<_CharT, _Traits> >::type __rhs) _NOEXCEPT
@@ -764,9 +813,13 @@ bool operator>=(basic_string_view<_CharT, _Traits> __lhs,
     return __lhs.compare(__rhs) >= 0;
 }
 
+#ifdef _LIBCPP_COMPILER_MSVC
+template<class _CharT, class _Traits, int = 2>
+#else
 template<class _CharT, class _Traits>
+#endif
 _LIBCPP_CONSTEXPR_AFTER_CXX11 _LIBCPP_INLINE_VISIBILITY
-bool operator>=(typename common_type<basic_string_view<_CharT, _Traits> >::type __lhs, 
+bool operator>=(typename common_type<basic_string_view<_CharT, _Traits> >::type __lhs,
                 basic_string_view<_CharT, _Traits> __rhs) _NOEXCEPT
 {
     return __lhs.compare(__rhs) >= 0;
@@ -792,7 +845,7 @@ struct _LIBCPP_TEMPLATE_VIS hash<basic_string_view<_CharT, _Traits> >
 };
 
 
-#if _LIBCPP_STD_VER > 11 
+#if _LIBCPP_STD_VER > 11
 inline namespace literals
 {
   inline namespace string_view_literals

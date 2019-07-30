@@ -1,14 +1,17 @@
 #include "loss_description.h"
+#include "data_processing_options.h"
 #include "json_helper.h"
 
 #include <util/string/builder.h>
 #include <util/string/cast.h>
-#include <util/string/iterator.h>
+#include <util/string/split.h>
 #include <util/string/vector.h>
+#include <util/string/strip.h>
+#include <util/string/subst.h>
 
 
 ELossFunction ParseLossType(const TStringBuf lossDescription) {
-    const TVector<TStringBuf> tokens = StringSplitter(lossDescription).SplitLimited(':', 2);
+    const TVector<TStringBuf> tokens = StringSplitter(lossDescription).Split(':').Limit(2);
     CB_ENSURE(!tokens.empty(), "custom loss is missing in description: " << lossDescription);
     ELossFunction customLoss;
     CB_ENSURE(TryFromString<ELossFunction>(tokens[0], customLoss), tokens[0] << " loss is not supported");
@@ -19,18 +22,19 @@ TMap<TString, TString> ParseLossParams(const TStringBuf lossDescription) {
     const char* errorMessage = "Invalid metric description, it should be in the form "
                                "\"metric_name:param1=value1;...;paramN=valueN\"";
 
-    const TVector<TStringBuf> tokens = StringSplitter(lossDescription).SplitLimited(':', 2);
+    const TVector<TStringBuf> tokens = StringSplitter(lossDescription).Split(':').Limit(2);
     CB_ENSURE(!tokens.empty(), "Metric description should not be empty");
     CB_ENSURE(tokens.size() <= 2, errorMessage);
 
     TMap<TString, TString> params;
     if (tokens.size() == 2) {
         for (const auto& token : StringSplitter(tokens[1]).Split(';')) {
-            const TVector<TString> keyValue = StringSplitter(token.Token()).SplitLimited('=', 2);
+            const TVector<TString> keyValue = StringSplitter(token.Token()).Split('=').Limit(2);
             CB_ENSURE(keyValue.size() == 2, errorMessage);
             params[keyValue[0]] = keyValue[1];
         }
     }
+
     return params;
 }
 
@@ -71,7 +75,7 @@ double NCatboostOptions::GetLogLossBorder(const TLossDescription& lossFunctionCo
     if (lossParams.contains("border")) {
         return FromString<float>(lossParams.at("border"));
     }
-    return 0.5;
+    return GetDefaultTargetBorder();
 }
 
 double NCatboostOptions::GetAlpha(const TMap<TString, TString>& lossParams) {
@@ -124,6 +128,16 @@ double NCatboostOptions::GetLqParam(const TLossDescription& lossFunctionConfig) 
         return FromString<double>(lossParams.at("q"));
     } else {
         CB_ENSURE(false, "For " << ELossFunction::Lq << " q parameter is mandatory");
+    }
+}
+
+double NCatboostOptions::GetHuberParam(const TLossDescription& lossFunctionConfig) {
+    Y_ASSERT(lossFunctionConfig.GetLossFunction() == ELossFunction::Huber);
+    const auto& lossParams = lossFunctionConfig.GetLossParams();
+    if (lossParams.contains("delta")) {
+        return FromString<double>(lossParams.at("delta"));
+    } else {
+        CB_ENSURE(false, "For " << ELossFunction::Huber << " delta parameter is mandatory");
     }
 }
 
@@ -218,7 +232,7 @@ TMap<TString, TString> ParseHintsDescription(const TStringBuf hintsDescription) 
 
     TMap<TString, TString> hints;
     for (const auto& token : tokens) {
-        const TVector<TString> keyValue = StringSplitter(token).SplitLimited('~', 2);
+        const TVector<TString> keyValue = StringSplitter(token).Split('~').Limit(2);
         CB_ENSURE(keyValue.size() == 2, errorMessage);
         CB_ENSURE(!hints.contains(keyValue[0]), "Two similar keys in hints description are not allowed");
         hints[keyValue[0]] = keyValue[1];
@@ -256,3 +270,18 @@ NJson::TJsonValue LossDescriptionToJson(const TStringBuf lossDescription) {
     }
     return descriptionJson;
 }
+
+TString BuildMetricOptionDescription(const NJson::TJsonValue& lossOptions) {
+    TString paramType = StripString(ToString(lossOptions["type"]), EqualsStripAdapter('"'));
+    paramType += ":";
+
+    for (const auto& elem : lossOptions["params"].GetMap()) {
+        const TString& paramName = elem.first;
+        const TString& paramValue = StripString(ToString(elem.second), EqualsStripAdapter('"'));
+        paramType += paramName + "=" + paramValue + ";";
+    }
+
+    paramType.pop_back();
+    return paramType;
+}
+

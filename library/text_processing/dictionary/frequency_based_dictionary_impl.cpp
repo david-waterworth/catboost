@@ -36,7 +36,6 @@ void TUnigramDictionaryImpl::ApplyImpl(
         ApplyFuncToLetterNGrams(
             tokens,
             DictionaryOptions.GramOrder,
-            DictionaryOptions.SkipStep,
             DictionaryOptions.EndOfWordTokenPolicy == EEndOfWordTokenPolicy::Insert,
             applyFunc
         );
@@ -188,7 +187,7 @@ static void GetTokenInfoFromLineInNewFormat(
     TVector<ui64>* idToCount
 ) {
     TVector<TStringBuf> splittedLine;
-    StringSplitter(line).SplitLimited('\t', 3).Collect(&splittedLine);
+    StringSplitter(line).Split('\t').Limit(3).Collect(&splittedLine);
     auto token = splittedLine[2];
     (*tokenToId)[token] = FromString<ui32>(splittedLine[0]);
     idToToken->emplace_back(tokenToId->find(token)->first);
@@ -217,4 +216,37 @@ void TUnigramDictionaryImpl::Load(IInputStream* stream, bool isNewFormat) {
     }
     IdToCount.shrink_to_fit();
     InitializeSpecialTokenIds();
+}
+
+THolder<IMMapDictionaryImpl> TUnigramDictionaryImpl::CreateMMapDictionaryImpl() const {
+    TVector<TStringBuf> idToToken;
+    if (IdToToken.empty()) {
+        GetIdToTokenMapping(TokenToId, &idToToken);
+    }
+    const TVector<TStringBuf>& idToTokenRef = IdToToken.empty() ? idToToken : IdToToken;
+
+    TVector<TBucket> buckets;
+    ui64 seed;
+    BuildBuckets(
+        xrange<TTokenId>(idToTokenRef.size()),
+        [&](TTokenId tokenId, ui64 seed) {
+            auto hash = MurmurHash<ui64>(
+                (void*)(idToTokenRef[tokenId].data()),
+                idToTokenRef[tokenId].size(),
+                seed
+            );
+            return std::make_pair(hash, tokenId);
+        },
+        &buckets,
+        &seed
+    );
+
+    TVector<ui8> dictionaryMetaInfoBuffer;
+    BuildDictionaryMetaInfo(Size(), DictionaryOptions, &dictionaryMetaInfoBuffer);
+
+    return MakeHolder<TMMapUnigramDictionaryImpl>(
+        std::move(dictionaryMetaInfoBuffer),
+        std::move(buckets),
+        seed
+    );
 }

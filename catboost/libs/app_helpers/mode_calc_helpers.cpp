@@ -10,7 +10,7 @@
 #include <catboost/libs/logging/logging.h>
 
 #include <util/string/cast.h>
-#include <util/string/iterator.h>
+#include <util/string/split.h>
 
 #include <util/generic/utility.h>
 #include <util/generic/xrange.h>
@@ -44,7 +44,7 @@ void NCB::PrepareCalcModeParamsParser(
             "Comma separated list of prediction types. Every prediction type should be one of: Probability, Class, RawFormulaVal")
         .Handler1T<TString>([&](const TString& predictionTypes) {
             params.PredictionTypes.clear();
-            params.OutputColumnsIds = {"DocId"};
+            params.OutputColumnsIds = {"SampleId"};
             for (const auto& typeName : StringSplitter(predictionTypes).Split(',').SkipEmpty()) {
                 params.PredictionTypes.push_back(FromString<EPredictionType>(typeName.Token()));
                 params.OutputColumnsIds.push_back(FromString<TString>(typeName.Token()));
@@ -74,7 +74,7 @@ void NCB::ReadModelAndUpdateParams(
                   "Model has invalid ctr provider, possibly you are using core model without or with incomplete ctr data");
     }
 
-    params.ClassNames = GetModelClassNames(model);
+    params.ClassNames = model.GetModelClassNames();
 
     if (iterationsLimit == 0) {
         iterationsLimit = model.GetTreeCount();
@@ -103,7 +103,7 @@ static NCB::TEvalResult Apply(
     if (maybeBaseline) {
         AssignRank2(*maybeBaseline, &rawValues[0]);
     } else {
-        rawValues[0].resize(model.ObliviousTrees.ApproxDimension,
+        rawValues[0].resize(model.GetDimensionsCount(),
                             TVector<double>(dataset.ObjectsGrouping->GetObjectCount(), 0.0));
     }
     TModelCalcerOnPool modelCalcerOnPool(model, dataset.ObjectsData, executor);
@@ -132,7 +132,7 @@ void NCB::CalcModelSingleHost(
     const NCB::TAnalyticalModeCommonParams& params,
     size_t iterationsLimit,
     size_t evalPeriod,
-    const TFullModel& model ) {
+    TFullModel&& model) {
 
     CB_ENSURE(params.OutputPath.Scheme == "dsv" || params.OutputPath.Scheme == "stream", "Local model evaluation supports only \"dsv\"  and \"stream\" output file schemas.");
     NCatboostOptions::ValidatePoolParams(params.InputPath, params.DsvPoolFormatParams);
@@ -157,10 +157,13 @@ void NCB::CalcModelSingleHost(
     bool IsFirstBlock = true;
     ui64 docIdOffset = 0;
     auto poolColumnsPrinter = CreatePoolColumnPrinter(params.InputPath, params.DsvPoolFormatParams.Format);
-    const int blockSize = Max<int>(32, static_cast<int>(10000. / (static_cast<double>(iterationsLimit) / evalPeriod) / model.ObliviousTrees.ApproxDimension));
+    const int blockSize = Max<int>(
+        32,
+        static_cast<int>(10000. / (static_cast<double>(iterationsLimit) / evalPeriod) / model.GetDimensionsCount())
+    );
     ReadAndProceedPoolInBlocks(params, blockSize, [&](const NCB::TDataProviderPtr datasetPart) {
         if (IsFirstBlock) {
-            ValidateColumnOutput(params.OutputColumnsIds, *datasetPart, true);
+            ValidateColumnOutput(params.OutputColumnsIds, *datasetPart);
         }
         auto approx = Apply(model, *datasetPart, 0, iterationsLimit, evalPeriod, &executor);
         auto visibleLabelsHelper = BuildLabelsHelper<TExternalLabelsHelper>(model);
@@ -174,7 +177,6 @@ void NCB::CalcModelSingleHost(
             params.OutputColumnsIds,
             visibleLabelsHelper,
             *datasetPart,
-            true,
             outputStream.Get(),
             // TODO: src file columns output is incompatible with block processing
             poolColumnsPrinter,

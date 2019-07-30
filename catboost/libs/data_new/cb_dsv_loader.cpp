@@ -11,7 +11,6 @@
 #include <util/generic/strbuf.h>
 #include <util/generic/vector.h>
 #include <util/stream/file.h>
-#include <util/string/iterator.h>
 #include <util/string/split.h>
 #include <util/system/types.h>
 
@@ -103,9 +102,16 @@ namespace NCB {
             TVector<ui32> catFeatures;
             catFeatures.yresize(featuresLayout.GetCatFeatureCount());
 
+            TVector<TString> textFeatures;
+            textFeatures.yresize(featuresLayout.GetTextFeatureCount());
+
             size_t tokenCount = 0;
             TVector<TStringBuf> tokens = StringSplitter(line).Split(FieldDelimiter);
             try {
+                CB_ENSURE(
+                    tokens.size() == columnsDescription.size(),
+                    "wrong column count: expected " << columnsDescription.ysize() << ", found " << tokens.size()
+                );
                 for (const auto& token : tokens) {
                     try {
                         switch (columnsDescription[tokenCount].Type) {
@@ -130,6 +136,14 @@ namespace NCB {
                                             " Try correcting column description file."
                                         );
                                     }
+                                }
+                                ++featureId;
+                                break;
+                            }
+                            case EColumn::Text: {
+                                if (!FeatureIgnored[featureId]) {
+                                    const ui32 textFeatureIdx = featuresLayout.GetInternalFeatureIdx(featureId);
+                                    textFeatures[textFeatureIdx] = TString(token);
                                 }
                                 ++featureId;
                                 break;
@@ -193,11 +207,9 @@ namespace NCB {
                 if (!catFeatures.empty()) {
                     visitor->AddAllCatFeatures(lineIdx, catFeatures);
                 }
-                CB_ENSURE(
-                    tokenCount == columnsDescription.size(),
-                    "wrong columns number: expected " << columnsDescription.ysize()
-                    << ", found " << tokenCount
-                );
+                if (!textFeatures.empty()) {
+                    visitor->AddAllTextFeatures(lineIdx, textFeatures);
+                }
             } catch (yexception& e) {
                 throw TCatBoostException() << "Error in dsv data. Line " <<
                     AsyncRowProcessor.GetLinesProcessed() + lineIdx + 1 << ": " << e.what();

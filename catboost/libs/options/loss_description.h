@@ -51,6 +51,8 @@ namespace NCatboostOptions {
 
     double GetLqParam(const TLossDescription& lossFunctionConfig);
 
+    double GetHuberParam(const TLossDescription& lossFunctionConfig);
+
     double GetQuerySoftMaxLambdaReg(const TLossDescription& lossFunctionConfig);
 
     ui32 GetMaxPairCount(const TLossDescription& lossFunctionConfig);
@@ -68,3 +70,4 @@ TMap<TString, TString> ParseHintsDescription(TStringBuf hintsDescription);
 TString MakeHintsDescription(const TMap<TString, TString>& hints);
 
 NJson::TJsonValue LossDescriptionToJson(TStringBuf lossDescription);
+TString BuildMetricOptionDescription(const NJson::TJsonValue& lossOptions);

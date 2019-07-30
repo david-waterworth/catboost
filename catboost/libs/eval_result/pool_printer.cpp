@@ -6,7 +6,7 @@
 
 #include <util/generic/xrange.h>
 #include <util/string/cast.h>
-#include <util/string/iterator.h>
+#include <util/string/split.h>
 #include <util/system/byteorder.h>
 #include <util/system/unaligned_mem.h>
 
@@ -63,7 +63,7 @@ namespace NCB {
     }
 
     TQuantizedPoolColumnsPrinter::TQuantizedPoolColumnsPrinter(const TPathWithScheme& testSetPath)
-        : QuantizedPool(LoadQuantizedPool(testSetPath, {/*LockMemory=*/false, /*Precharge=*/false}))
+        : QuantizedPool(LoadQuantizedPool(testSetPath, {/*LockMemory=*/false, /*Precharge=*/false, TDatasetSubset::MakeColumns()}))
     {
         for (const ui32 columnId : xrange(QuantizedPool.ColumnTypes.size())) {
             const auto columnType = QuantizedPool.ColumnTypes[columnId];

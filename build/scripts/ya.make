@@ -41,6 +41,7 @@ TEST_SRCS(
     ios_wrapper.py
     java_pack_to_file.py
     link_dyn_lib.py
+    link_exe.py
     link_fat_obj.py
     link_lib.py
     llvm_opt_wrapper.py
@@ -48,6 +49,7 @@ TEST_SRCS(
     merge_files.py
     mkdir.py
     mkver.py
+    pack_ios.py
     pack_jcoverage_resources.py
     perl_wrapper.py
     preprocess.py
@@ -66,6 +68,7 @@ TEST_SRCS(
     tar_directory.py
     touch.py
     unpacking_jtest_runner.py
+    vcs_info.py
     with_coverage.py
     with_crash_on_timeout.py
     with_pathsep_resolve.py
@@ -76,5 +79,7 @@ TEST_SRCS(
     yield_line.py
     yndexer.py
 )
+
+NO_LINT()
 
 END()

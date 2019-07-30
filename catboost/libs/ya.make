@@ -16,6 +16,7 @@ RECURSE(
     gpu_config
     helpers
     helpers/ut
+    hyperparameter_tuning
     index_range
     init
     labels
@@ -25,6 +26,7 @@ RECURSE(
     metrics
     metrics/ut
     model
+    model/model_export
     model/model_export/ut
     model/ut
     model_interface
@@ -35,6 +37,7 @@ RECURSE(
     quantization_schema
     quantization_schema/ut
     quantized_pool
+    quantized_pool_analysis
     quantized_pool/ut
     target
     train_lib
@@ -43,4 +46,17 @@ RECURSE(
     feature_estimator
     text_features
     text_features/ut
+    train_interface
 )
+
+IF (HAVE_CUDA)
+    RECURSE(
+    cuda_wrappers
+)
+ENDIF()
+
+IF (NOT OS_WINDOWS)
+    RECURSE(
+    model_interface/static
+)
+ENDIF()

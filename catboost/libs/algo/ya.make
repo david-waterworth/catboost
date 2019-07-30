@@ -26,6 +26,7 @@ SRCS(
     index_calcer.cpp
     index_hash_calcer.cpp
     learn_context.cpp
+    model_quantization_adapter.cpp
     mvs.cpp
     online_ctr.cpp
     online_predictor.cpp
@@ -35,6 +36,7 @@ SRCS(
     rand_score.cpp
     score_bin.cpp
     score_calcer.cpp
+    short_vector_ops.cpp
     split.cpp
     target_classifier.cpp
     tensor_search_helpers.cpp
@@ -44,6 +46,7 @@ SRCS(
     pairwise_leaves_calculation.cpp
     pairwise_scoring.cpp
     roc_curve.cpp
+    monotonic_constraint_utils.cpp
 )
 
 PEERDIR(
@@ -51,6 +54,7 @@ PEERDIR(
     catboost/libs/data_new
     catboost/libs/data_types
     catboost/libs/eval_result
+    catboost/libs/feature_estimator
     catboost/libs/helpers
     catboost/libs/index_range
     catboost/libs/labels
@@ -75,7 +79,6 @@ PEERDIR(
     library/json
     library/malloc/api
     library/object_factory
-    library/par
     library/svnversion
     library/threading/local_executor
 )

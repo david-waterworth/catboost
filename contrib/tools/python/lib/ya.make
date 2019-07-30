@@ -9,6 +9,7 @@ LICENSE(
 INCLUDE(${ARCADIA_ROOT}/contrib/tools/python/pyconfig.inc)
 
 PEERDIR(
+    certs
     contrib/tools/python/base
     contrib/tools/python/include
 )
@@ -19,9 +20,12 @@ SRCDIR(
     ${PYTHON_SRC_DIR}/Lib
 )
 
-IF (YMAKE)
-    PYTHON(bootstrap.py python_frozen_modules.rodata bootstrap.c python-libs.txt IN python-libs.txt OUT bootstrap.c OUT python_frozen_modules.rodata
+RUN_PROGRAM(
+    contrib/tools/python/bootstrap bootstrap.py python_frozen_modules.rodata bootstrap.c python-libs.txt
+    IN bootstrap.py python-libs.txt
+    OUT python_frozen_modules.rodata bootstrap.c
 
+ENV PYTHONPATH=${PYTHON_SRC_DIR}/Lib
 IN ${PYTHON_SRC_DIR}/Include/Python.h
 IN __future__.py
 IN __phello__.foo.py
@@ -1114,9 +1118,6 @@ IN xmllib.py
 IN xmlrpclib.py
 IN zipfile.py
 
-    )
-ELSE ()
-    PYTHON(bootstrap.py bootstrap.c python-libs.txt IN python-libs.txt OUT bootstrap.c)
-ENDIF()
+)
 
 END()

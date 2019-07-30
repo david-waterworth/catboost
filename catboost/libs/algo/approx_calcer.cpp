@@ -2,20 +2,27 @@
 #include "approx_calcer_helpers.h"
 #include "approx_calcer_multi.h"
 #include "approx_calcer_querywise.h"
+#include "error_functions.h"
 #include "fold.h"
-#include "score_calcer.h"
 #include "index_calcer.h"
 #include "learn_context.h"
-#include "error_functions.h"
-#include "yetirank_helpers.h"
 #include "pairwise_leaves_calculation.h"
+#include "score_calcer.h"
+#include "split.h"
+#include "yetirank_helpers.h"
+#include "monotonic_constraint_utils.h"
 
 #include <catboost/libs/data_new/data_provider.h>
+#include <catboost/libs/helpers/parallel_tasks.h>
 #include <catboost/libs/logging/logging.h>
 #include <catboost/libs/logging/profile_info.h>
+#include <catboost/libs/options/catboost_options.h>
 #include <catboost/libs/options/enum_helpers.h>
 
+#include <library/threading/local_executor/local_executor.h>
+
 #include <util/generic/ymath.h>
+
 
 template <bool StoreExpApprox, int VectorWidth>
 inline void UpdateApproxKernel(const double* leafDeltas, const TIndexType* indices, double* deltasDimension) {
@@ -66,7 +73,7 @@ void UpdateApproxDeltas(
     TVector<double>* leafDeltas,
     TVector<double>* deltasDimension
 ) {
-    ExpApproxIf(storeExpApprox, leafDeltas);
+    ExpApproxIf(storeExpApprox, *leafDeltas);
 
     double* deltasDimensionData = deltasDimension->data();
     const TIndexType* indicesData = indices.data();
@@ -75,37 +82,26 @@ void UpdateApproxDeltas(
     NPar::TLocalExecutor::TExecRangeParams blockParams(0, docCount);
     blockParams.SetBlockSize(1000);
 
-    if (storeExpApprox) {
-        localExecutor->ExecRange(
-            [=] (int blockIdx) {
-                UpdateApproxBlock</*StoreExpApprox*/ true>(
-                    blockParams,
-                    leafDeltasData,
-                    indicesData,
-                    blockIdx,
-                    deltasDimensionData
-                );
-            },
-            0,
-            blockParams.GetBlockCount(),
-            NPar::TLocalExecutor::WAIT_COMPLETE
-        );
-    } else {
-        localExecutor->ExecRange(
-            [=] (int blockIdx) {
-                UpdateApproxBlock</*StoreExpApprox*/ false>(
-                    blockParams,
-                    leafDeltasData,
-                    indicesData,
-                    blockIdx,
-                    deltasDimensionData
-                );
-            },
-            0,
-            blockParams.GetBlockCount(),
-            NPar::TLocalExecutor::WAIT_COMPLETE
-        );
-    }
+    const auto getUpdateApproxBlockLambda = [&] (auto boolConst) -> std::function<void(int)> {
+        return [=] (int blockIdx) {
+            UpdateApproxBlock</*StoreExpApprox*/ boolConst.value>(
+                blockParams,
+                leafDeltasData,
+                indicesData,
+                blockIdx,
+                deltasDimensionData
+            );
+        };
+    };
+    const auto updateApproxBlockLambda = (storeExpApprox ?
+        getUpdateApproxBlockLambda(std::true_type()) : getUpdateApproxBlockLambda(std::false_type())
+    );
+    localExecutor->ExecRange(
+        updateApproxBlockLambda,
+        0,
+        blockParams.GetBlockCount(),
+        NPar::TLocalExecutor::WAIT_COMPLETE
+    );
 }
 
 static void CalcApproxDers(
@@ -169,7 +165,7 @@ static void CalcLeafDers(
     TConstArrayRef<double> approxesDelta,
     const IDerCalcer& error,
     int sampleCount,
-    int iteration,
+    bool recalcLeafWeights,
     ELeavesEstimation estimationMethod,
     NPar::TLocalExecutor* localExecutor,
     TArrayRef<TSum> leafDers,
@@ -210,14 +206,14 @@ static void CalcLeafDers(
             ) {
                 const int innerCount = Min(nextBlockStart - innerBlockStart, innerBlockSize);
                 error.CalcDersRange(
-                    innerBlockStart,
+                    0,
                     innerCount,
                     /*calcThirdDer=*/false,
-                    approxes.data(),
-                    approxesDelta.data(),
-                    targets.data(),
-                    weights.data(),
-                    approxDers.data() - innerBlockStart
+                    approxes.data() + innerBlockStart,
+                    approxesDelta.empty() ? nullptr : approxesDelta.data() + innerBlockStart,
+                    targets.data() + innerBlockStart,
+                    weights.empty() ? nullptr : weights.data() + innerBlockStart,
+                    approxDers.data()
                 );
                 if (weights.empty()) {
                     CalcLeafDersImpl<false>(
@@ -254,7 +250,7 @@ static void CalcLeafDers(
                     AddMethodDer<ELeavesEstimation::Newton>(
                         blockBucketDers[blockId][leafId],
                         blockBucketSumWeights[blockId][leafId],
-                        iteration,
+                        /* updateWeight */ false, // value doesn't matter
                         &leafDers[leafId]
                     );
                 }
@@ -268,7 +264,7 @@ static void CalcLeafDers(
                     AddMethodDer<ELeavesEstimation::Gradient>(
                         blockBucketDers[blockId][leafId],
                         blockBucketSumWeights[blockId][leafId],
-                        iteration,
+                        recalcLeafWeights,
                         &leafDers[leafId]
                     );
                 }
@@ -286,7 +282,7 @@ void CalcLeafDersSimple(
     const IDerCalcer& error,
     int sampleCount,
     int queryCount,
-    int iteration,
+    bool recalcLeafWeights,
     ELeavesEstimation estimationMethod,
     const NCatboostOptions::TCatBoostOptions& params,
     ui64 randomSeed,
@@ -304,7 +300,7 @@ void CalcLeafDersSimple(
             approxDeltas,
             error,
             sampleCount,
-            iteration,
+            recalcLeafWeights,
             estimationMethod,
             localExecutor,
             *leafDers,
@@ -318,7 +314,7 @@ void CalcLeafDersSimple(
 
         TVector<TQueryInfo> recalculatedQueriesInfo;
         TVector<float> recalculatedPairwiseWeights;
-        const bool shouldGenerateYetiRankPairs = ShouldGenerateYetiRankPairs(
+        const bool shouldGenerateYetiRankPairs = IsYetiRankLossFunction(
             params.LossFunctionDescription->GetLossFunction()
         );
         if (shouldGenerateYetiRankPairs) {
@@ -360,7 +356,7 @@ void CalcLeafDersSimple(
             /*queryStartIndex=*/0,
             queryCount,
             estimationMethod,
-            iteration,
+            recalcLeafWeights,
             leafDers,
             localExecutor
         );
@@ -426,13 +422,53 @@ void CalcLeafDeltasSimple(
     }
 }
 
+static void CalcMonotonicLeafDeltasSimple(
+    const TVector<TSum>& leafDers,
+    const ELeavesEstimation& estimationMethod,
+    const double scaledL2Regularizer,
+    const TVector<double>& currLeafValues,
+    const TVector<TVector<ui32>>& leafMonotonicLinearOrders,
+    TVector<double>* leafDeltas
+) {
+    const int leafCount = leafDers.size();
+    leafDeltas->yresize(leafCount);
+    TVector<double> leafWeights(leafCount);
+    if (estimationMethod == ELeavesEstimation::Gradient) {
+        for (int leafIndex = 0; leafIndex < leafCount; ++leafIndex) {
+            const double leafWeight = leafDers[leafIndex].SumWeights + scaledL2Regularizer;
+            leafWeights[leafIndex] = leafWeight;
+            (*leafDeltas)[leafIndex] = leafDers[leafIndex].SumDer / leafWeight;
+        }
+    } else {
+        Y_ASSERT(estimationMethod == ELeavesEstimation::Newton);
+        for (int leafIndex = 0; leafIndex < leafCount; ++leafIndex) {
+            const double leafWeight = -leafDers[leafIndex].SumDer2 + scaledL2Regularizer;
+            leafWeights[leafIndex] = leafWeight;
+            (*leafDeltas)[leafIndex] = leafDers[leafIndex].SumDer / leafWeight;
+        }
+    }
+    TVector<double> updatedLeafValues = currLeafValues;
+    AddElementwise(*leafDeltas, &updatedLeafValues);
+    for (const auto& linearOrder : leafMonotonicLinearOrders) {
+        CalcOneDimensionalIsotonicRegression(
+            updatedLeafValues,
+            leafWeights,
+            linearOrder,
+            &updatedLeafValues
+        );
+        Y_VERIFY_DEBUG(CheckMonotonicity(linearOrder, updatedLeafValues), "Tree monotonization failed");
+    }
+    for (int leafIndex = 0; leafIndex < leafCount; ++leafIndex) {
+        (*leafDeltas)[leafIndex] = updatedLeafValues[leafIndex] - currLeafValues[leafIndex];
+    }
+}
+
 static void UpdateApproxDeltasHistoricallyImpl(
     int rowStart,
     int rowCount,
     TConstArrayRef<TIndexType> leafIndices,
     TConstArrayRef<float> weights,
     TConstArrayRef<TDers> approxDers, // view of size rowCount
-    int iterationIdx,
     float l2Regularizer,
     double bodySumWeight,
     ELeavesEstimation estimationMethod,
@@ -446,7 +482,9 @@ static void UpdateApproxDeltasHistoricallyImpl(
             const double rowWeight = UseWeights ? weights[rowIdx] : 1;
             sumWeights += rowWeight;
             TSum& leafDer = leafDers[leafIndices[rowIdx]];
-            AddMethodDer<EstimationMethod>(approxDers[rowIdx - rowStart], rowWeight, iterationIdx, &leafDer);
+            AddMethodDer<EstimationMethod>(
+                approxDers[rowIdx - rowStart], rowWeight, /* updateWeight */ true, &leafDer
+            );
             double approxDelta = CalcMethodDelta<EstimationMethod>(leafDer, l2Regularizer, sumWeights, rowIdx);
             if (UseExpApprox) {
                 FastExpInplace(&approxDelta, /*count*/1);
@@ -516,19 +554,18 @@ static void UpdateApproxDeltasHistorically(
     const TFold& fold,
     const TFold::TBodyTail& bt,
     const IDerCalcer& error,
-    int iterationIdx,
     float l2Regularizer,
     const NCatboostOptions::TCatBoostOptions& params,
     ui64 randomSeed,
     NPar::TLocalExecutor* localExecutor,
     TLearnContext* ctx,
-    TVector<TSum>* leafDers,
+    TArrayRef<TSum> leafDers,
     TVector<double>* approxDeltas,
     TArrayRef<TDers> approxDers
 ) {
     TVector<TQueryInfo> recalculatedQueriesInfo;
     TVector<float> recalculatedPairwiseWeights;
-    const bool shouldGenerateYetiRankPairs = ShouldGenerateYetiRankPairs(
+    const bool shouldGenerateYetiRankPairs = IsYetiRankLossFunction(
         params.LossFunctionDescription->GetLossFunction()
     );
     if (shouldGenerateYetiRankPairs) {
@@ -589,12 +626,11 @@ static void UpdateApproxDeltasHistorically(
         indices,
         weights,
         approxDers,
-        iterationIdx,
         l2Regularizer,
         bt.BodySumWeight,
         estimationMethod,
         error.GetIsExpApprox(),
-        *leafDers,
+        leafDers,
         *approxDeltas
     );
 }
@@ -615,8 +651,8 @@ void GradientWalker(
     TVector<TVector<double>> step(dimensionCount, TVector<double>(leafCount)); // iteration scratch space
     if (isTrivial) {
         for (int iterationIdx = 0; iterationIdx < iterationCount; ++iterationIdx) {
-            calculateStep(iterationIdx, *point, &step);
-            updatePoint(iterationIdx, step, point);
+            calculateStep(iterationIdx == 0, *point, &step);
+            updatePoint(step, point);
             if (stepSum != nullptr) {
                 AddElementwise(step, stepSum);
             }
@@ -625,16 +661,16 @@ void GradientWalker(
     }
     TVector<TVector<double>> startPoint; // iteration scratch space
     double lossValue = calculateLoss(*point);
-    for (int iterationIdx = 0, bucketHistoryIdx = 0;
-         iterationIdx < iterationCount;
-         ++iterationIdx, ++bucketHistoryIdx)
+    for (int iterationIdx = 0; iterationIdx < iterationCount; ++iterationIdx)
     {
-        calculateStep(bucketHistoryIdx, *point, &step);
+        calculateStep(iterationIdx == 0, *point, &step);
         copyPoint(*point, &startPoint);
         double scale = 1.0;
+        // if monotone constraints are nontrivial the scale should be less or equal to 1.0.
+        // Otherwise monotonicity may be violated.
         do {
             const auto scaledStep = ScaleElementwise(scale, step);
-            updatePoint(bucketHistoryIdx, scaledStep, point);
+            updatePoint(scaledStep, point);
             const double valueAfterStep = calculateLoss(*point);
             if (valueAfterStep < lossValue) {
                 lossValue = valueAfterStep;
@@ -668,6 +704,7 @@ static void CalcApproxDeltaSimple(
     const IDerCalcer& error,
     const TVector<TIndexType>& indices,
     ui64 randomSeed,
+    const TVector<int>& treeMonotoneConstraints,
     TLearnContext* ctx,
     TVector<TVector<double>>* approxDeltas,
     TVector<TVector<double>>* sumLeafDeltas
@@ -686,8 +723,18 @@ static void CalcApproxDeltaSimple(
     const auto estimationMethod = treeLearnerOptions.LeavesEstimationMethod;
     TVector<TSum> leafDers(leafCount, TSum()); // iteration scratch space
     TArray2D<double> pairwiseBuckets; // iteration scratch space
+    const bool treeHasMonotonicConstraints = AnyOf(
+            treeMonotoneConstraints,
+            [] (int val) { return val != 0;}
+    );
+    const auto leafMonotonicLinearOrders = (
+            treeHasMonotonicConstraints ?
+            BuildMonotonicLinearOrdersOnLeafs(treeMonotoneConstraints) :
+            TVector<TVector<ui32>>()
+    );
+
     const auto leafUpdaterFunc = [&] (
-        int bucketHistoryIdx,
+        bool recalcLeafWeights,
         const TVector<TVector<double>>& approxDeltas,
         TVector<TVector<double>>* leafDeltas
     ) {
@@ -703,7 +750,7 @@ static void CalcApproxDeltaSimple(
             error,
             bt.BodyFinish,
             bt.BodyQueryFinish,
-            bucketHistoryIdx,
+            recalcLeafWeights,
             estimationMethod,
             ctx->Params,
             randomSeed,
@@ -712,19 +759,32 @@ static void CalcApproxDeltaSimple(
             &pairwiseBuckets,
             &weightedDers
         );
-        CalcLeafDeltasSimple(
-            leafDers,
-            pairwiseBuckets,
-            ctx->Params,
-            bt.BodySumWeight,
-            bt.BodyFinish,
-            &(*leafDeltas)[0]
-        );
+        if (treeHasMonotonicConstraints) {
+            const double scaledL2Regularizer = (
+                ctx->Params.ObliviousTreeOptions->L2Reg * (fold.GetSumWeight() / fold.GetLearnSampleCount())
+            );
+            CalcMonotonicLeafDeltasSimple(
+                leafDers,
+                estimationMethod,
+                scaledL2Regularizer,
+                /*curLeafValues*/TVector<double>(leafCount),
+                leafMonotonicLinearOrders,
+                &(*leafDeltas)[0]
+            );
+        } else {
+            CalcLeafDeltasSimple(
+                leafDers,
+                pairwiseBuckets,
+                ctx->Params,
+                bt.BodySumWeight,
+                bt.BodyFinish,
+                &(*leafDeltas)[0]
+            );
+        }
     };
 
     const float l2Regularizer = treeLearnerOptions.L2Reg;
     const auto approxUpdaterFunc = [&] (
-        int bucketHistoryIdx,
         const TVector<TVector<double>>& leafDeltas,
         TVector<TVector<double>>* approxDeltas
     ) {
@@ -748,25 +808,25 @@ static void CalcApproxDeltaSimple(
                 &localLeafValues[0],
                 &(*approxDeltas)[0]
             );
+            auto localLeafDers = leafDers;
             UpdateApproxDeltasHistorically(
                 indices,
                 fold,
                 bt,
                 error,
-                bucketHistoryIdx,
                 l2Regularizer,
                 ctx->Params,
                 randomSeed,
                 ctx->LocalExecutor,
                 ctx,
-                &leafDers,
+                localLeafDers,
                 &(*approxDeltas)[0],
                 weightedDers
             );
         }
     };
 
-    const int dimensionCount = ctx->LearnProgress.ApproxDimension;
+    const int dimensionCount = ctx->LearnProgress->ApproxDimension;
     const bool isTrivialWalker
         = gradientIterations == 1 ||
             (ctx->Params.ObliviousTreeOptions->LeavesEstimationBacktrackingType ==
@@ -774,7 +834,7 @@ static void CalcApproxDeltaSimple(
     TVector<THolder<IMetric>> lossFunction;
     double directionSign = 0;
     if (!isTrivialWalker) {
-        lossFunction = CreateDefaultMetricForObjective(ctx->Params.LossFunctionDescription, dimensionCount);
+        lossFunction = CreateMetricFromDescription(ctx->Params.MetricOptions.Get().ObjectiveMetric, dimensionCount);
         directionSign = GetDirectionSign(lossFunction[0]);
     }
     const auto lossCalcerFunc = [&] (const TVector<TVector<double>>& approxDeltas) {
@@ -787,8 +847,9 @@ static void CalcApproxDeltaSimple(
             bodyTailTarget,
             fold.GetLearnWeights(),
             bodyTailQueryInfo,
-            lossFunction[0],
-            ctx->LocalExecutor);
+            *lossFunction[0],
+            ctx->LocalExecutor
+        );
         return directionSign * lossFunction[0]->GetFinalError(additiveStats);
     };
 
@@ -815,6 +876,7 @@ static void CalcLeafValuesSimple(
     const IDerCalcer& error,
     const TFold& fold,
     const TVector<TIndexType>& indices,
+    const TVector<int>& treeMonotoneConstraints,
     TLearnContext* ctx,
     TVector<TVector<double>>* sumLeafDeltas
 ) {
@@ -822,6 +884,7 @@ static void CalcLeafValuesSimple(
         ? APPROX_BLOCK_SIZE * CB_THREAD_LIMIT
         : fold.GetLearnSampleCount();
     TVector<TDers> weightedDers(scratchSize);
+    sumLeafDeltas->assign(1, TVector<double>(leafCount));
 
     const int queryCount = fold.LearnQueriesInfo.ysize();
     const auto& learnerOptions = ctx->Params.ObliviousTreeOptions.Get();
@@ -830,14 +893,22 @@ static void CalcLeafValuesSimple(
     auto& localExecutor = *ctx->LocalExecutor;
     const TFold::TBodyTail& bt = fold.BodyTailArr[0];
 
-    TVector<TVector<double>> approxes(
-        1,
-        TVector<double>(bt.Approx[0].begin(), bt.Approx[0].begin() + fold.GetLearnSampleCount())
-    ); // iteration scratch space
+    const bool treeHasMonotonicConstraints = AnyOf(
+        treeMonotoneConstraints,
+        [] (int val) { return val != 0;}
+    );
+    const auto leafMonotonicLinearOrders = (
+        treeHasMonotonicConstraints ?
+        BuildMonotonicLinearOrdersOnLeafs(treeMonotoneConstraints) :
+        TVector<TVector<ui32>>()
+    );
+
+    TVector<TVector<double>> approxes;
+    CopyApprox(bt.Approx, &approxes, ctx->LocalExecutor);
     TVector<TSum> leafDers(leafCount, TSum()); // iteration scratch space
     TArray2D<double> pairwiseBuckets; // iteration scratch space
     const auto leafUpdaterFunc = [&] (
-        int bucketHistoryIdx,
+        bool recalcLeafWeights,
         const TVector<TVector<double>>& approxes,
         TVector<TVector<double>>* leafDeltas
     ) {
@@ -853,27 +924,41 @@ static void CalcLeafValuesSimple(
             error,
             fold.GetLearnSampleCount(),
             queryCount,
-            bucketHistoryIdx,
+            recalcLeafWeights,
             estimationMethod,
             ctx->Params,
-            ctx->Rand.GenRand(),
+            ctx->LearnProgress->Rand.GenRand(),
             &localExecutor,
             &leafDers,
             &pairwiseBuckets,
             &weightedDers
         );
-        CalcLeafDeltasSimple(
-            leafDers,
-            pairwiseBuckets,
-            ctx->Params,
-            fold.GetSumWeight(),
-            fold.GetLearnSampleCount(),
-            &(*leafDeltas)[0]
-        );
+
+        if (treeHasMonotonicConstraints) {
+            const double scaledL2Regularizer = (
+                ctx->Params.ObliviousTreeOptions->L2Reg * (fold.GetSumWeight() / fold.GetLearnSampleCount())
+            );
+            CalcMonotonicLeafDeltasSimple(
+                leafDers,
+                estimationMethod,
+                scaledL2Regularizer,
+                (*sumLeafDeltas)[0],
+                leafMonotonicLinearOrders,
+                &(*leafDeltas)[0]
+            );
+        } else {
+            CalcLeafDeltasSimple(
+                leafDers,
+                pairwiseBuckets,
+                ctx->Params,
+                fold.GetSumWeight(),
+                fold.GetLearnSampleCount(),
+                &(*leafDeltas)[0]
+            );
+        }
     };
 
     const auto approxUpdaterFunc = [&] (
-        int /*bucketHistoryIdx*/,
         const TVector<TVector<double>>& leafDeltas,
         TVector<TVector<double>>* approxes
     ) {
@@ -888,7 +973,7 @@ static void CalcLeafValuesSimple(
         );
     };
 
-    const int dimensionCount = ctx->LearnProgress.ApproxDimension;
+    const int dimensionCount = ctx->LearnProgress->ApproxDimension;
     const bool isTrivialWalker
         = gradientIterations == 1 ||
             (ctx->Params.ObliviousTreeOptions->LeavesEstimationBacktrackingType ==
@@ -896,7 +981,7 @@ static void CalcLeafValuesSimple(
     TVector<THolder<IMetric>> lossFunction;
     double directionSign = 0;
     if (!isTrivialWalker) {
-        lossFunction = CreateDefaultMetricForObjective(ctx->Params.LossFunctionDescription, dimensionCount);
+        lossFunction = CreateMetricFromDescription(ctx->Params.MetricOptions->ObjectiveMetric, dimensionCount);
         directionSign = GetDirectionSign(lossFunction[0]);
     }
     const auto lossCalcerFunc = [&] (const TVector<TVector<double>>& approx) {
@@ -907,7 +992,7 @@ static void CalcLeafValuesSimple(
             fold.LearnTarget,
             fold.GetLearnWeights(),
             fold.LearnQueriesInfo,
-            lossFunction[0],
+            *lossFunction[0],
             &localExecutor
         );
         return directionSign * lossFunction[0]->GetFinalError(additiveStats);
@@ -917,7 +1002,6 @@ static void CalcLeafValuesSimple(
         CopyApprox(src, dst, ctx->LocalExecutor);
     };
 
-    sumLeafDeltas->assign(1, TVector<double>(leafCount));
     GradientWalker(
         isTrivialWalker,
         gradientIterations,
@@ -942,11 +1026,17 @@ void CalcLeafValues(
     TVector<TIndexType>* indices
 ) {
     *indices = BuildIndices(fold, tree, data.Learn, data.Test, ctx->LocalExecutor);
-    const int approxDimension = ctx->LearnProgress.AveragingFold.GetApproxDimension();
+    const int approxDimension = ctx->LearnProgress->AveragingFold.GetApproxDimension();
     Y_VERIFY(fold.GetLearnSampleCount() == data.Learn->GetObjectCount());
     const int leafCount = tree.GetLeafCount();
+
+    const auto treeMonotoneConstraints = GetTreeMonotoneConstraints(
+        tree,
+        ctx->Params.ObliviousTreeOptions->MonotoneConstraints.Get()
+    );
+
     if (approxDimension == 1) {
-        CalcLeafValuesSimple(leafCount, error, fold, *indices, ctx, leafDeltas);
+        CalcLeafValuesSimple(leafCount, error, fold, *indices, treeMonotoneConstraints, ctx, leafDeltas);
     } else {
         CalcLeafValuesMulti(leafCount, error, fold, *indices, ctx, leafDeltas);
     }
@@ -963,8 +1053,13 @@ void CalcApproxForLeafStruct(
     TVector<TVector<TVector<double>>>* approxesDelta // [bodyTailId][approxDim][docIdxInPermuted]
 ) {
     const TVector<TIndexType> indices = BuildIndices(fold, tree, data.Learn, data.Test, ctx->LocalExecutor);
-    const int approxDimension = ctx->LearnProgress.ApproxDimension;
+    const int approxDimension = ctx->LearnProgress->ApproxDimension;
     const int leafCount = tree.GetLeafCount();
+    const auto treeMonotoneConstraints = GetTreeMonotoneConstraints(
+        tree,
+        ctx->Params.ObliviousTreeOptions->MonotoneConstraints.Get()
+    );
+
     TVector<ui64> randomSeeds;
     if (approxDimension == 1) {
         randomSeeds = GenRandUI64Vector(fold.BodyTailArr.ysize(), randomSeed);
@@ -975,13 +1070,7 @@ void CalcApproxForLeafStruct(
             const TFold::TBodyTail& bt = fold.BodyTailArr[bodyTailId];
             TVector<TVector<double>>& approxDeltas = (*approxesDelta)[bodyTailId];
             const double initValue = GetNeutralApprox(error.GetIsExpApprox());
-            if (approxDeltas.empty()) {
-                approxDeltas.assign(approxDimension, TVector<double>(bt.TailFinish, initValue));
-            } else {
-                for (auto& deltaDimension : approxDeltas) {
-                    Fill(deltaDimension.begin(), deltaDimension.end(), initValue);
-                }
-            }
+            NCB::FillRank2(initValue, approxDimension, bt.TailFinish, &approxDeltas, ctx->LocalExecutor);
             if (approxDimension == 1) {
                 CalcApproxDeltaSimple(
                     fold,
@@ -990,6 +1079,7 @@ void CalcApproxForLeafStruct(
                     error,
                     indices,
                     randomSeeds[bodyTailId],
+                    treeMonotoneConstraints,
                     ctx,
                     &approxDeltas,
                     /*sumLeafDeltas*/ nullptr

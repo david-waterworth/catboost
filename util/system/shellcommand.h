@@ -8,6 +8,7 @@
 #include <util/generic/maybe.h>
 #include <util/stream/input.h>
 #include <util/stream/output.h>
+#include "file.h"
 #include "getpid.h"
 #include "thread.h"
 #include "mutex.h"
@@ -20,6 +21,20 @@ public:
 #if defined(_win_)
         TString Password;
 #endif
+#if defined(_unix_)
+        /**
+         * Run child process with the user supplementary groups.
+         * If true, the user supplementary groups will be set in the child process upon exec().
+         * If false, the supplementary groups of the parent process will be used.
+         */
+        bool UseUserGroups = false;
+#endif
+    };
+
+    enum EHandleMode {
+        HANDLE_INHERIT,
+        HANDLE_PIPE,
+        HANDLE_STREAM
     };
 
 public:
@@ -33,6 +48,7 @@ public:
         , DetachSession(true)
         , CloseStreams(false)
         , ShouldCloseInput(true)
+        , InputMode(HANDLE_INHERIT)
         , InheritOutput(false)
         , InheritError(false)
         , InputStream(nullptr)
@@ -49,7 +65,7 @@ public:
     }
 
     /**
-     * @brief clear signal mask from parent process.  If true, child process
+     * @brief clear signal mask from parent process. If true, child process
      * clears the signal mask inherited from the parent process; otherwise
      * child process retains the signal mask of the parent process.
      *
@@ -63,7 +79,7 @@ public:
     }
 
     /**
-     * @brief set close-on-exec mode.  If true, all file descriptors
+     * @brief set close-on-exec mode. If true, all file descriptors
      * from the parent process, except stdin, stdout, stderr, will be closed
      * in the child process upon exec().
      *
@@ -114,6 +130,11 @@ public:
      */
     inline TShellCommandOptions& SetInputStream(IInputStream* stream) {
         InputStream = stream;
+        if (InputStream == nullptr) {
+            InputMode = HANDLE_INHERIT;
+        } else {
+            InputMode = HANDLE_STREAM;
+        }
         return *this;
     }
 
@@ -215,6 +236,18 @@ public:
     }
 
     /**
+     * @brief create a pipe for child input
+     * Write end of the pipe will be accessible via TShellCommand::GetInputHandle
+     *
+     * @return self
+     */
+    inline TShellCommandOptions& PipeInput() {
+        InputMode = HANDLE_PIPE;
+        InputStream = nullptr;
+        return *this;
+    }
+
+    /**
      * @brief set if child should inherit output handle
      *
      * @param inherit if child should inherit output handle
@@ -248,6 +281,7 @@ public:
     bool DetachSession;
     bool CloseStreams;
     bool ShouldCloseInput;
+    EHandleMode InputMode;
     bool InheritOutput;
     bool InheritError;
     /// @todo more options
@@ -353,6 +387,27 @@ public:
      * @return pid or handle
      */
     TProcessId GetPid() const;
+
+    /**
+     * @brief return the file handle that provides input to the child process
+     *
+     * @return input file handle
+     */
+    TFileHandle& GetInputHandle();
+
+    /**
+     * @brief return the file handle that provides output from the child process
+     *
+     * @return output file handle
+     */
+    TFileHandle& GetOutputHandle();
+
+    /**
+     * @brief return the file handle that provides error output from the child process
+     *
+     * @return error file handle
+     */
+    TFileHandle& GetErrorHandle();
 
     /**
      * @brief run the execution

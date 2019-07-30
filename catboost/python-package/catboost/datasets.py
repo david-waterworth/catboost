@@ -59,8 +59,8 @@ def _cached_download(url, md5, dst):
 
     dst_md5 = _calc_md5(dst)
     if dst_md5 != md5:
-        raise RuntimeError('md5 sum mismatch; expected {expected}, but got {got}'.format(
-            expected=md5, got=dst_md5))
+        raise RuntimeError('md5 sum mismatch for url {url}; expected {expected}, but got {got}'.format(
+            url=u, expected=md5, got=dst_md5))
 
 
 def _get_cache_path():
@@ -154,6 +154,48 @@ def epsilon():
     return (
         _load_numeric_only_dataset(train_path, 400000, 2001, sep='\t'),
         _load_numeric_only_dataset(test_path, 100000, 2001, sep='\t'))
+
+
+def monotonic1():
+    """
+    Yandex internal dataset with monotonic constraints.
+    Can be used for regression.
+    Has several numerical and several categorical features.
+    The first column contains target values. Columns with names Cat* contain categorical features.
+    Columns with names Num* contain numerical features.
+
+    Dataset also contains several numerical features, for which monotonic constraints must hold.
+    For features in columns named MonotonicNeg*, if feature value decreases, then prediction value must not decrease.
+    Thus, if there are two samples x1, x2 with all features being equal except
+    for a monotonic negative feature M, such that x1[M] > x2[M], then the following inequality must
+    hold for predictions: f(x1) <= f(x2)
+    """
+    url = 'https://storage.mds.yandex.net/get-devtools-opensource/233854/monotonic1.tar.gz'
+    md5 = '4d9bf62372afd44feb0842fa8b4ed058'
+    dataset_name, train_file, test_file = 'monotonic1', 'train.csv', 'test.csv'
+    return _cached_dataset_load_pd(url, md5, dataset_name, train_file, test_file, sep='\t')
+
+
+def monotonic2():
+    """
+    Yandex internal dataset with monotonic constraints.
+    Can be used for regression.
+    The first column contains target values.
+    Other columns contain contain numerical features, for which monotonic constraints must hold.
+
+    For features in columns named MonotonicNeg*, if feature value decreases, then prediction
+    value must not decrease. Thus, if there are two samples x1, x2 with all features being
+    equal except for a monotonic negative feature MNeg, such that x1[MNeg] > x2[MNeg], then
+    the following inequality must hold for predictions: f(x1) <= f(x2)
+    For features in columns named MonotonicPos*, if feature value decreases, then prediction
+    value must not increase. Thus, if there are two samples x1, x2 with all features being
+    equal except for a monotonic positive feature MPos, such that x1[MPos] > x2[MPos],
+    then the following inequality must hold for predictions: f(x1) >= f(x2)
+    """
+    url = 'https://storage.mds.yandex.net/get-devtools-opensource/471749/monotonic2.tar.gz'
+    md5 = 'e8ac054b276f164e57f9bde9cc8da0d9'
+    dataset_name, train_file, test_file = 'monotonic2', 'train.tsv', 'test.tsv'
+    return _cached_dataset_load_pd(url, md5, dataset_name, train_file, test_file, sep='\t')
 
 
 def adult():

@@ -21,6 +21,7 @@ JOIN_SRCS(
     datetime/constants.cpp
     datetime/cputimer.cpp
     datetime/systime.cpp
+    datetime/uptime.cpp
 )
 
 SRCS(
@@ -221,7 +222,6 @@ JOIN_SRCS(
     string/cstriter.cpp
     string/escape.cpp
     string/hex.cpp
-    string/iterator.cpp
     string/join.cpp
     string/kmp.cpp
     string/pcdata.cpp

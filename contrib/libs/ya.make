@@ -24,12 +24,9 @@ RECURSE(
     lz4
     lz4/generated
     lzmasdk
-    musl-1.1.20
     nayuki_md5
     onnx
     openssl
-    openssl/1.0.2
-    openssl/1.0.2/apps
     openssl/apps
     openssl/dynamic
     protobuf
@@ -37,11 +34,13 @@ RECURSE(
     protobuf/python
     protobuf/python/test
     protobuf/ut
+    pugixml
     python
     python/ut
     snappy
     sqlite3
     tensorboard
+    xxhash
     zlib
     zstd
     zstd06
@@ -101,12 +100,6 @@ IF (OS_WINDOWS AND USE_UWP)
 ENDIF()
 
 IF (OS_ANDROID)
-    RECURSE(
-    
-)
-ENDIF()
-
-IF (ARCH_PPC64LE)
     RECURSE(
     
 )

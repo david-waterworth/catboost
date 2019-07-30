@@ -806,14 +806,14 @@ print.catboost.Pool <- function(x, ...) {
 #'       Possible values:
 #'       \itemize{
 #'         \item L2
-#'         \item Correlation
+#'         \item Cosine
 #'         \item NewtonL2
-#'         \item NewtonCorrelation
+#'         \item NewtonCosine
 #'       }
 #'
 #'       Default value:
 #'
-#'       Correlation
+#'       Cosine
 #'
 #'       For growing policy Lossguide default is NewtonL2.
 #'
@@ -840,9 +840,9 @@ print.catboost.Pool <- function(x, ...) {
 #'
 #'     \item has_time
 #'
-#'       Use the order of objects in the input data 
+#'       Use the order of objects in the input data
 #'       (do not perform a random permutation of the dataset at the preprocessing stage)
-#' 
+#'
 #'       Default value:
 #'
 #'       FALSE (not used; permute input dataset)
@@ -949,7 +949,7 @@ print.catboost.Pool <- function(x, ...) {
 #'         \item 'MVS'
 #'         \item 'No'
 #'       }
-#' 
+#'
 #'       Poisson bootstrap is supported only on GPU.
 #'
 #'       Default value:
@@ -1214,7 +1214,7 @@ print.catboost.Pool <- function(x, ...) {
 #'       Default value:
 #'
 #'       254 for training on CPU or 128 for training on GPU
-#' 
+#'
 #'     \item feature_border_type
 #'
 #'       The binarization mode (see \url{https://tech.yandex.com/catboost/doc/dg/concepts/binarization-docpage/#binarization})
@@ -1348,25 +1348,25 @@ print.catboost.Pool <- function(x, ...) {
 #'       Default value:
 #'
 #'       5000000
-#' 
+#'
 #'   \item dev_efb_max_buckets
 #'
-#'       CPU only. Maximum bucket count in exclusive features bundle. Should be in an integer between 0 and 65536. 
+#'       CPU only. Maximum bucket count in exclusive features bundle. Should be in an integer between 0 and 65536.
 #'       Used only for learning speed tuning.
-#'       
+#'
 #'       Default value:
 #'
 #'       1024
-#' 
-#'   \item efb_max_conflict_fraction
-#' 
+#'
+#'   \item sparse_features_conflict_fraction
+#'
 #'      CPU only. Maximum allowed fraction of conflicting non-default values for features in exclusive features bundle.
 #'      Should be a real value in [0, 1) interval.
-#' 
+#'
 #'      Default value:
-#' 
+#'
 #'      0.0
-#' 
+#'
 #'    \item leaf_estimation_backtracking
 #'
 #'        Type of backtracking during gradient descent.
@@ -1427,7 +1427,10 @@ catboost.train <- function(learn_pool, test_pool = NULL, params = list()) {
     model <- list(handle = handle, raw = raw)
     class(model) <- "catboost.Model"
 
-    model$feature_importances <- catboost.get_feature_importance(model, learn_pool)
+    if (catboost._is_oblivious(model)) {
+        model$feature_importances <- catboost.get_feature_importance(model, learn_pool)
+    }
+
     model$tree_count <- catboost.ntrees(model)
     return(model)
 }
@@ -1478,10 +1481,13 @@ catboost.cv <- function(pool, params = list(),
 #' @param model_path The path to the model.
 #'
 #' Default value: Required argument
+#' @param file_format Format of the model file.
+#'
+#' Default value: 'cbm'
 #' @export
 #' @seealso \url{https://tech.yandex.com/catboost/doc/dg/concepts/r-reference_catboost-load_model-docpage/}
-catboost.load_model <- function(model_path) {
-    handle <- .Call("CatBoostReadModel_R", model_path)
+catboost.load_model <- function(model_path, file_format = "cbm") {
+    handle <- .Call("CatBoostReadModel_R", model_path, file_format)
     raw <- .Call("CatBoostSerializeModel_R", handle)
     model <- list(handle = handle, raw = raw)
     class(model) <- "catboost.Model"
@@ -1501,12 +1507,41 @@ catboost.load_model <- function(model_path) {
 #' Used for solving other machine learning problems (for instance, applying a model).
 #'
 #' Default value: Required argument
+#' @param file_format specified format model from a file.
+#' Possible values:
+#' \itemize{
+#'   \item 'cbm'
+#'     For catboost binary format
+#'   \item 'coreml'
+#'     To export into Apple CoreML format
+#'   \item 'onnx'
+#'     To export into ONNX-ML format
+#'   \item 'pmml'
+#'     To export into PMML format
+#'   \item 'cpp'
+#'     To export as C++ code
+#'   \item 'python'
+#'     To export as Python code. 
+#' }
+#'
+#' Default value: 'cbm'
+#' @param export_parameters are a parameters for CoreML or PMML export.
+#' @param pool is training pool.
 #' @export
-#' @seealso \url{https://tech.yandex.com/catboost/doc/dg/concepts/r-reference_catboost-save_model-docpage/}
-catboost.save_model <- function(model, model_path) {
+#' @seealso \url{https://catboost.ai/docs/features/export-model-to-core-ml.html}
+catboost.save_model <- function(model, model_path,
+                                file_format = "cbm",
+                                export_parameters = NULL,
+                                pool = NULL) {
+    if (!is.null(pool) && class(pool) != "catboost.Pool")
+        stop("Expected catboost.Pool, got: ", class(pool))
+    params_string <- ""
+    if (!is.null(export_parameters))
+        params_string <- jsonlite::toJSON(params, auto_unbox = TRUE)
+
     if (is.null.handle(model$handle))
         model$handle <- .Call("CatBoostDeserializeModel_R", model$raw)
-    status <- .Call("CatBoostOutputModel_R", model$handle, model_path)
+    status <- .Call("CatBoostOutputModel_R", model$handle, model_path, file_format, params_string, pool)
     return(status)
 }
 
@@ -1560,7 +1595,6 @@ catboost.predict <- function(model, pool,
 
     if (is.null.handle(model$handle))
         model$handle <- .Call("CatBoostDeserializeModel_R", model$raw)
-
     prediction <- .Call("CatBoostPredictMulti_R", model$handle, pool,
                         verbose, prediction_type, ntree_start, ntree_end, thread_count)
     prediction_columns <- length(prediction) / nrow(pool)
@@ -1700,7 +1734,6 @@ catboost.staged_predict <- function(model, pool, verbose = FALSE, prediction_typ
 catboost.get_feature_importance <- function(model, pool = NULL, type = "FeatureImportance", thread_count = -1, fstr_type = NULL) {
     if (!is.null(fstr_type)) {
         type <- fstr_type
-        warning("fstr_type option is deprecated, use type instead")
     }
     if (class(model) != "catboost.Model")
         stop("Expected catboost.Model, got: ", class(model))
@@ -1747,7 +1780,7 @@ catboost.get_feature_importance <- function(model, pool = NULL, type = "FeatureI
 #' @param top_size Method returns the result of the top_size most important train objects. If -1, then the top size is not limited.
 #'
 #' Default value: -1
-#' @param ostr_type The ostr type.
+#' @param type.
 #'
 #' Possible values:
 #' \itemize{
@@ -1777,6 +1810,7 @@ catboost.get_feature_importance <- function(model, pool = NULL, type = "FeatureI
 #' Allows you to optimize the speed of execution. This parameter doesn't affect results.
 #'
 #' Default value: -1
+#' @param ostr_type Deprecated parameter, use 'type' instead.
 #' @export
 #' @seealso \url{https://tech.yandex.com/catboost/doc/dg/concepts/}
 catboost.get_object_importance <- function(
@@ -1784,9 +1818,10 @@ catboost.get_object_importance <- function(
     pool,
     train_pool,
     top_size = -1,
-    ostr_type = "Average",
+    type = "Average",
     update_method = "SinglePoint",
-    thread_count = -1
+    thread_count = -1,
+    ostr_type = NULL
 ) {
     if (class(model) != "catboost.Model")
         stop("Expected catboost.Model, got: ", class(model))
@@ -1798,7 +1833,11 @@ catboost.get_object_importance <- function(
         stop("top_size should be positive integer or -1.")
     if (is.null.handle(model$handle))
         model$handle <- .Call("CatBoostDeserializeModel_R", model$raw)
-    importances <- .Call("CatBoostEvaluateObjectImportances_R", model$handle, pool, train_pool, top_size, ostr_type, update_method, thread_count)
+    if (!is.null(ostr_type)) {
+        type <- ostr_type
+        warning("ostr_type option is deprecated, use type instead")
+    }
+    importances <- .Call("CatBoostEvaluateObjectImportances_R", model$handle, pool, train_pool, top_size, type, update_method, thread_count)
     indices <- head(importances, length(importances) / 2)
     scores <- tail(importances, length(importances) / 2)
     column_count <- nrow(train_pool)
@@ -1834,6 +1873,7 @@ catboost.shrink <- function(model, ntree_end, ntree_start = 0) {
     return(status)
 }
 
+
 #' Drop unused features information from model
 #'
 #' @param model The model obtained as the result of training.
@@ -1854,6 +1894,7 @@ catboost.drop_unused_features <- function(model, ntree_end, ntree_start = 0) {
     return(status)
 }
 
+
 catboost.ntrees <- function(model) {
     if (class(model) != "catboost.Model")
         stop("Expected catboost.Model, got: ", class(model))
@@ -1861,6 +1902,16 @@ catboost.ntrees <- function(model) {
         model$handle <- .Call("CatBoostDeserializeModel_R", model$raw)
     num_trees <- .Call("CatBoostGetNumTrees_R", model$handle)
     return(num_trees)
+}
+
+
+catboost._is_oblivious <- function(model) {
+    if (class(model) != "catboost.Model")
+        stop("Expected catboost.Model, got: ", class(model))
+    if (is.null.handle(model$handle))
+        model$handle <- .Call("CatBoostDeserializeModel_R", model$raw)
+    is_oblivious <- .Call("CatBoostIsOblivious_R", model$handle)
+    return(is_oblivious)
 }
 
 

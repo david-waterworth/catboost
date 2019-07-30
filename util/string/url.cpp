@@ -183,8 +183,8 @@ void SplitUrlToHostAndPath(const TStringBuf url, TString& host, TString& path) {
     TStringBuf hostBuf;
     TStringBuf pathBuf;
     SplitUrlToHostAndPath(url, hostBuf, pathBuf);
-    hostBuf.ToString().swap(host);
-    pathBuf.ToString().swap(path);
+    host = hostBuf;
+    path = pathBuf;
 }
 
 bool TryGetSchemeHostAndPort(const TStringBuf url, TStringBuf& scheme, TStringBuf& host, ui16& port) {
@@ -261,6 +261,33 @@ TStringBuf GetZone(const TStringBuf host) noexcept {
 TStringBuf CutWWWPrefix(const TStringBuf url) noexcept {
     if (url.size() >= 4 && url[3] == '.' && !strnicmp(url.data(), "www", 3))
         return url.substr(4);
+    return url;
+}
+
+TStringBuf CutWWWNumberedPrefix(const TStringBuf url) noexcept {
+    auto it = url.begin();
+
+    StripRangeBegin(it, url.end(), [](auto& it){ return *it == 'w' || *it == 'W'; });
+    if (it == url.begin()) {
+        return url;
+    }
+
+    StripRangeBegin(it, url.end(), [](auto& it){ return IsAsciiDigit(*it); });
+    if (it == url.end()) {
+        return url;
+    }
+
+    if (*it++ == '.') {
+        return url.Tail(it - url.begin());
+    }
+
+    return url;
+}
+
+TStringBuf CutMPrefix(const TStringBuf url) noexcept {
+    if (url.size() >= 2 && url[1] == '.' && (url[0] == 'm' || url[0] == 'M')) {
+        return url.substr(2);
+    }
     return url;
 }
 

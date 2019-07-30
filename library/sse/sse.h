@@ -13,7 +13,17 @@
 #if (defined(_i386_) || defined(_x86_64_)) && defined(_sse_)
 #include <xmmintrin.h>
 #include <emmintrin.h>
+#include <pmmintrin.h>
 #define ARCADIA_SSE
+#if defined(_ssse3_)
+#include <tmmintrin.h>
+#endif
+#if defined(_sse4_1_)
+#include <smmintrin.h>
+#endif
+#if defined(_sse4_2_)
+#include <nmmintrin.h>
+#endif
 #elif defined(_arm64_)
 #include "sse2neon.h"
 #define ARCADIA_SSE

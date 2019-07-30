@@ -2,13 +2,21 @@
 
 #include "approx_dimension.h"
 
-#include <catboost/libs/helpers/exception.h>
+
 #include <catboost/libs/data_new/borders_io.h>
 #include <catboost/libs/data_new/quantization.h>
+#include <catboost/libs/helpers/exception.h>
+#include <catboost/libs/helpers/restorable_rng.h>
+#include <catboost/libs/labels/label_converter.h>
 #include <catboost/libs/metrics/metric.h>
+#include <catboost/libs/options/catboost_options.h>
 #include <catboost/libs/options/system_options.h>
 #include <catboost/libs/target/data_providers.h>
+#include <catboost/libs/feature_estimator/text_feature_estimators.h>
 
+#include <library/threading/local_executor/local_executor.h>
+
+#include <util/generic/algorithm.h>
 #include <util/string/builder.h>
 
 
@@ -45,6 +53,7 @@ namespace NCB {
         TQuantizedFeaturesInfoPtr quantizedFeaturesInfo,
         NCatboostOptions::TCatBoostOptions* params,
         TLabelConverter* labelConverter,
+        TMaybe<float>* targetBorder,
         NPar::TLocalExecutor* localExecutor,
         TRestorableFastRng64* rand) {
 
@@ -100,7 +109,7 @@ namespace NCB {
                 quantizationOptions.ExclusiveFeaturesBundlingOptions.MaxBuckets
                     = params->ObliviousTreeOptions->DevExclusiveFeaturesBundleMaxBuckets.Get();
                 quantizationOptions.ExclusiveFeaturesBundlingOptions.MaxConflictFraction
-                    = params->ObliviousTreeOptions->ExclusiveFeaturesBundleMaxConflictFraction.Get();
+                    = params->ObliviousTreeOptions->SparseFeaturesConflictFraction.Get();
             } else {
                 Y_ASSERT(params->GetTaskType() == ETaskType::GPU);
 
@@ -130,6 +139,7 @@ namespace NCB {
                     params->DataProcessingOptions->IgnoredFeatures.Get(),
                     params->DataProcessingOptions->FloatFeaturesBinarization.Get(),
                     params->DataProcessingOptions->PerFloatFeatureBinarization.Get(),
+                    params->DataProcessingOptions->TextProcessing.Get(),
                     /*allowNansInTestOnly*/true
                 );
 
@@ -155,7 +165,8 @@ namespace NCB {
                 std::move(rawObjectsDataProvider),
                 quantizedFeaturesInfo,
                 rand,
-                localExecutor);
+                localExecutor
+            );
 
             // because some features can become unavailable/ignored due to quantization
             trainingData->MetaInfo.FeaturesLayout = quantizedFeaturesInfo->GetFeaturesLayout();
@@ -191,9 +202,13 @@ namespace NCB {
             dataProcessingOptions.ClassWeights.Get(),
             &dataProcessingOptions.ClassNames.Get(),
             labelConverter,
+            targetBorder,
             rand,
             localExecutor,
-            &trainingData->MetaInfo.HasPairs);
+            &trainingData->MetaInfo.HasPairs
+        );
+
+        trainingData->UpdateMetaInfo();
 
         return trainingData;
     }
@@ -218,6 +233,61 @@ namespace NCB {
         }
     }
 
+    static TTextDataSetPtr CreateTextDataSet(const TQuantizedObjectsDataProvider& dataProvider, TTextFeatureIdx textFeatureIdx) {
+        auto dictionary = dataProvider.GetQuantizedFeaturesInfo()->GetDictionary(textFeatureIdx);
+        auto text = *(*dataProvider.GetTextFeature(textFeatureIdx.Idx).Get())->GetArrayData().GetSrc();
+        return MakeIntrusive<TTextDataSet>(text, dictionary);
+    }
+
+    static TTextClassificationTargetPtr CreateTextClassificationTarget(const TTargetDataProvider& targetDataProvider) {
+
+        const ui32 numClasses = *targetDataProvider.GetTargetClassCount();
+        TConstArrayRef<float> target = *targetDataProvider.GetTargetForLoss();
+        TVector<ui32> classes;
+        classes.resize(target.size());
+
+        for (ui32 i = 0; i < target.size(); i++) {
+            classes[i] = static_cast<ui32>(target[i]);
+        }
+        return MakeIntrusive<TTextClassificationTarget>(std::move(classes), numClasses);
+    }
+
+    static TFeatureEstimators CreateEstimators(
+        TConstArrayRef<EFeatureCalcerType> estimatorsTypes,
+        TTrainingDataProviders pools) {
+
+        TFeatureEstimators estimators;
+        CB_ENSURE(
+            !AnyOf(estimatorsTypes, IsEmbeddingFeatureEstimator),
+            "Embedding features cannot be calculated yet"
+        );
+
+        auto learnTarget = CreateTextClassificationTarget(*pools.Learn->TargetData);
+        pools.Learn->MetaInfo.FeaturesLayout->IterateOverAvailableFeatures<EFeatureType::Text>(
+            [&estimators, &estimatorsTypes, &pools, &learnTarget](TTextFeatureIdx textFeatureIdx){
+                auto learnTexts = CreateTextDataSet(*pools.Learn->ObjectsData, textFeatureIdx);
+
+                TVector<TTextDataSetPtr> testTexts;
+                for (const auto& testDataProvider : pools.Test) {
+                    testTexts.emplace_back(CreateTextDataSet(*testDataProvider->ObjectsData, textFeatureIdx));
+                }
+
+                TEmbeddingPtr embedding;
+                auto offlineEstimators = CreateEstimators(estimatorsTypes, embedding, learnTexts, testTexts);
+                for (auto&& estimator : offlineEstimators) {
+                    estimators.FeatureEstimators.emplace_back(std::move(estimator));
+                }
+
+                auto onlineEstimators = CreateEstimators(estimatorsTypes, embedding, learnTarget, learnTexts, testTexts);
+                for (auto&& estimator : onlineEstimators) {
+                    estimators.OnlineFeatureEstimators.emplace_back(std::move(estimator));
+                }
+            }
+        );
+
+        return estimators;
+    }
+
 
     TTrainingDataProviders GetTrainingData(
         TDataProviders srcData,
@@ -232,6 +302,7 @@ namespace NCB {
 
         TTrainingDataProviders trainingData;
 
+        TMaybe<float> targetBorder = params->DataProcessingOptions->TargetBorder;
         trainingData.Learn = GetTrainingData(
             std::move(srcData.Learn),
             /*isLearnData*/ true,
@@ -243,8 +314,10 @@ namespace NCB {
             quantizedFeaturesInfo,
             params,
             labelConverter,
+            &targetBorder,
             localExecutor,
-            rand);
+            rand
+        );
 
         quantizedFeaturesInfo = trainingData.Learn->ObjectsData->GetQuantizedFeaturesInfo();
 
@@ -261,17 +334,29 @@ namespace NCB {
                     quantizedFeaturesInfo,
                     params,
                     labelConverter,
+                    &targetBorder,
                     localExecutor,
-                    rand));
+                    rand
+                )
+            );
         }
 
 
+        if (trainingData.Learn->MetaInfo.FeaturesLayout->GetTextFeatureCount() > 0 &&
+            params->TextFeatureOptions->FeatureEstimators->size() > 0) {
+            CB_ENSURE(
+                IsClassificationObjective(params->LossFunctionDescription->LossFunction),
+                "Computation of online text features is supported only for classification task"
+            );
+            trainingData.FeatureEstimators = CreateEstimators(params->TextFeatureOptions->FeatureEstimators.Get(), trainingData);
+        }
 
         if (params->MetricOptions->EvalMetric.IsSet() && (srcData.Test.size() > 0)) {
             CheckCompatibilityWithEvalMetric(
                 params->MetricOptions->EvalMetric,
                 *trainingData.Test.back(),
-                GetApproxDimension(*params, *labelConverter));
+                GetApproxDimension(*params, *labelConverter)
+            );
         }
 
 

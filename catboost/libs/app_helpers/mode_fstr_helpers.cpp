@@ -45,6 +45,7 @@ namespace {
                                            Params.DsvPoolFormatParams,
                                            /*ignoredFeatures*/ {},
                                            NCB::EObjectsOrder::Undefined,
+                                           NCB::TDatasetSubset::MakeColumns(),
                                            /*classNames*/ Nothing(),
                                            LocalExecutor.Get());
             }
@@ -105,7 +106,7 @@ void NCB::ModeFstrSingleHost(const NCB::TAnalyticalModeCommonParams& params) {
     switch (fstrType) {
         case EFstrType::PredictionValuesChange:
             CalcAndOutputFstr(model,
-                              model.ObliviousTrees.LeafWeights.empty() ? poolLoader() : nullptr,
+                              model.ObliviousTrees->LeafWeights.empty() ? poolLoader() : nullptr,
                               localExecutor.Get(),
                               &params.OutputPath.Path,
                               nullptr,
@@ -121,7 +122,7 @@ void NCB::ModeFstrSingleHost(const NCB::TAnalyticalModeCommonParams& params) {
             break;
         case EFstrType::InternalFeatureImportance:
             CalcAndOutputFstr(model,
-                              model.ObliviousTrees.LeafWeights.empty() ? poolLoader() : nullptr,
+                              model.ObliviousTrees->LeafWeights.empty() ? poolLoader() : nullptr,
                               localExecutor.Get(),
                               nullptr,
                               &params.OutputPath.Path,
@@ -134,7 +135,12 @@ void NCB::ModeFstrSingleHost(const NCB::TAnalyticalModeCommonParams& params) {
             CalcAndOutputInteraction(model, nullptr, &params.OutputPath.Path);
             break;
         case EFstrType::ShapValues:
-            CalcAndOutputShapValues(model, *poolLoader(), params.OutputPath.Path, params.Verbose, localExecutor.Get());
+            CalcAndOutputShapValues(model,
+                                    *poolLoader(),
+                                    params.OutputPath.Path,
+                                    params.Verbose,
+                                    EPreCalcShapValues::Auto,
+                                    localExecutor.Get());
             break;
         default:
             Y_ASSERT(false);

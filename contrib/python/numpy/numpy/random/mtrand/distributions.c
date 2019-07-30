@@ -41,10 +41,11 @@
  *   SOFTWARE OR ITS DOCUMENTATION.
  */
 
-#include <math.h>
-#include <stdlib.h>
 #include "distributions.h"
 #include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+#include <limits.h>
 
 #ifndef min
 #define min(x,y) ((x<y)?x:y)
@@ -197,9 +198,10 @@ double rk_beta(rk_state *state, double a, double b)
             X = pow(U, 1.0/a);
             Y = pow(V, 1.0/b);
 
-            if ((X + Y) <= 1.0)
+            /* Reject if both U and V are 0.0, which is approx 1 in 10^106 */
+            if (((X + Y) <= 1.0) && ((U + V) > 0.0))
             {
-                if (X +Y > 0)
+                if (X + Y > 0)
                 {
                     return X / (X + Y);
                 }
@@ -328,13 +330,15 @@ long rk_binomial_btpe(rk_state *state, long n, double p)
   Step30:
     if (u > p3) goto Step40;
     y = (long)floor(xl + log(v)/laml);
-    if (y < 0) goto Step10;
+    /* Reject if v == 0.0 since cast of inf not well defined */
+    if ((y < 0) || (v == 0.0)) goto Step10;
     v = v*(u-p2)*laml;
     goto Step50;
 
   Step40:
     y = (long)floor(xr - log(v)/lamr);
-    if (y > n) goto Step10;
+    /* Reject if v == 0.0 since cast of inf not well defined */
+    if ((y > n) || (v == 0.0)) goto Step10;
     v = v*(u-p3)*lamr;
 
   Step50:
@@ -500,6 +504,11 @@ long rk_poisson_mult(rk_state *state, double lam)
     }
 }
 
+/*
+ * The transformed rejection method for generating Poisson random variables
+ * W. Hoermann
+ * Insurance: Mathematics and Economics 12, 39-45 (1993)
+ */
 #define LS2PI 0.91893853320467267
 #define TWELFTH 0.083333333333333333333333
 long rk_poisson_ptrs(rk_state *state, double lam)
@@ -644,6 +653,9 @@ double rk_pareto(rk_state *state, double a)
 
 double rk_weibull(rk_state *state, double a)
 {
+    if (a == 0.0) {
+        return 0.0;
+    }
     return pow(rk_standard_exponential(state), 1./a);
 }
 
@@ -657,12 +669,17 @@ double rk_laplace(rk_state *state, double loc, double scale)
     double U;
 
     U = rk_double(state);
-    if (U < 0.5)
+    if (U >= 0.5)
+    {
+        U = loc - scale * log(2.0 - U - U);
+
+    } else if (U > 0.0)
     {
         U = loc + scale * log(U + U);
     } else
     {
-        U = loc - scale * log(2.0 - U - U);
+        /* Reject if U == 0.0 */
+        return rk_laplace(state, loc, scale);
     }
     return U;
 }
@@ -672,7 +689,9 @@ double rk_gumbel(rk_state *state, double loc, double scale)
     double U;
 
     U = 1.0 - rk_double(state);
-    return loc - scale * log(-log(U));
+    if (U < 1.0)
+        return loc - scale * log(-log(U));
+    return rk_gumbel(state, loc, scale);
 }
 
 double rk_logistic(rk_state *state, double loc, double scale)
@@ -680,7 +699,9 @@ double rk_logistic(rk_state *state, double loc, double scale)
     double U;
 
     U = rk_double(state);
-    return loc + scale * log(U/(1.0 - U));
+    if (U > 0.0)
+        return loc + scale * log(U/(1.0 - U));
+    return rk_logistic(state, loc, scale);
 }
 
 double rk_lognormal(rk_state *state, double mean, double sigma)
@@ -714,26 +735,31 @@ double rk_wald(rk_state *state, double mean, double scale)
 
 long rk_zipf(rk_state *state, double a)
 {
-    double T, U, V;
-    long X;
     double am1, b;
 
     am1 = a - 1.0;
     b = pow(2.0, am1);
-    do
-    {
-        U = 1.0-rk_double(state);
+    while (1) {
+        double T, U, V, X;
+
+        U = 1.0 - rk_double(state);
         V = rk_double(state);
-        X = (long)floor(pow(U, -1.0/am1));
-        /* The real result may be above what can be represented in a signed
-         * long. It will get casted to -sys.maxint-1. Since this is
-         * a straightforward rejection algorithm, we can just reject this value
-         * in the rejection condition below. This function then models a Zipf
+        X = floor(pow(U, -1.0/am1));
+        /*
+         * The real result may be above what can be represented in a signed
+         * long. Since this is a straightforward rejection algorithm, we can
+         * just reject this value. This function then models a Zipf
          * distribution truncated to sys.maxint.
          */
+        if (X > LONG_MAX || X < 1.0) {
+            continue;
+        }
+
         T = pow(1.0 + 1.0/X, am1);
-    } while (((V*X*(T-1.0)/(b-1.0)) > (T/b)) || X < 1);
-    return X;
+        if (V*X*(T - 1.0)/(b - 1.0) <= T/b) {
+            return (long)X;
+        }
+    }
 }
 
 long rk_geometric_search(rk_state *state, double p)
@@ -900,7 +926,8 @@ long rk_logseries(rk_state *state, double p)
         q = 1.0 - exp(r*U);
         if (V <= q*q) {
             result = (long)floor(1 + log(V)/log(q));
-            if (result < 1) {
+            /* Reject if v == 0.0 since cast of inf not well defined */
+            if ((result < 1) || (V == 0.0)) {
                 continue;
             }
             else {

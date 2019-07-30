@@ -1,12 +1,17 @@
 PY23_LIBRARY()
 
-VERSION(1.7.0)
+VERSION(1.8.0)
 
 LICENSE(
     MIT
 )
 
 
+
+NO_CHECK_IMPORTS(
+    py._code._assertionnew
+    py._code._assertionold
+)
 
 PY_SRCS(
     TOP_LEVEL
@@ -45,6 +50,12 @@ PY_SRCS(
     py/_vendored_packages/__init__.py
     py/_version.py
     py/_xmlgen.py
+)
+
+RESOURCE_FILES(
+    PREFIX contrib/python/py/
+    .dist-info/METADATA
+    .dist-info/top_level.txt
 )
 
 NO_LINT()

@@ -297,7 +297,8 @@ next_outer_loop_iter:
         TVector<TFeatureWithDegree> featuresWithDegree;
 
         for (auto flatFeatureIdx : xrange(featuresLayout.GetExternalFeatureCount())) {
-            if (!featuresMetaInfo[flatFeatureIdx].IsAvailable) {
+            if (!featuresMetaInfo[flatFeatureIdx].IsAvailable ||
+                featuresMetaInfo[flatFeatureIdx].Type == EFeatureType::Text) {
                 continue;
             }
 
@@ -544,7 +545,7 @@ next_outer_loop_iter:
 
         for (auto flatFeatureIdx : xrange(featureCount)) {
             const auto& featureMetaInfo = featuresMetaInfo[flatFeatureIdx];
-            if (!featureMetaInfo.IsAvailable) {
+            if (!featureMetaInfo.IsAvailable || featureMetaInfo.Type == EFeatureType::Text) {
                 continue;
             }
 
@@ -567,12 +568,14 @@ next_outer_loop_iter:
                     quantizedFeaturesInfo,
                     TFloatFeatureIdx(featuresLayout.GetInternalFeatureIdx(flatFeatureIdx))
                 );
-            } else {
+            } else if (featureMetaInfo.Type == EFeatureType::Categorical) {
                 getNonDefaultValuesMaskFunctions[flatFeatureIdx] = GetQuantizedCatNonDefaultValuesMaskFunction(
                     rawObjectsData,
                     quantizedFeaturesInfo,
                     TCatFeatureIdx(featuresLayout.GetInternalFeatureIdx(flatFeatureIdx))
                 );
+            } else {
+                CB_ENSURE(false, featureMetaInfo.Type << " is not supported for feature bundles");
             }
         }
 

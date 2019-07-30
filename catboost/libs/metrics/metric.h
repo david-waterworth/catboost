@@ -6,6 +6,7 @@
 #include <catboost/libs/data_types/pair.h>
 #include <catboost/libs/data_types/query.h>
 #include <catboost/libs/helpers/vector_helpers.h>
+#include <catboost/libs/options/data_processing_options.h>
 #include <catboost/libs/options/enum_helpers.h>
 #include <catboost/libs/options/loss_description.h>
 #include <catboost/libs/options/metric_options.h>
@@ -17,9 +18,7 @@
 
 #include <cmath>
 
-constexpr double GetDefaultClassificationBorder() {
-    return 0.5;
-}
+using NCatboostOptions::GetDefaultTargetBorder;
 
 template <typename T>
 struct TMetricParam {
@@ -127,7 +126,7 @@ struct IMetric {
     virtual ~IMetric() = default;
 
 public:
-    TMetricParam<bool> UseWeights{"use_weights", true};
+    TMetricParam<bool> UseWeights{"use_weights", false};
 };
 
 struct TMetric: public IMetric {
@@ -208,9 +207,9 @@ struct TNonAdditiveMetric: public TMetric {
 
 THolder<IMetric> MakeCrossEntropyMetric(
     ELossFunction lossFunction,
-    double border = GetDefaultClassificationBorder());
+    double border = GetDefaultTargetBorder());
 
-THolder<IMetric> MakeCtrFactorMetric(double border = GetDefaultClassificationBorder());
+THolder<IMetric> MakeCtrFactorMetric(double border = GetDefaultTargetBorder());
 
 THolder<IMetric> MakeRMSEMetric();
 
@@ -221,6 +220,8 @@ THolder<IMetric> MakeR2Metric();
 THolder<IMetric> MakeNumErrorsMetric(double k);
 
 THolder<IMetric> MakeQuantileMetric(ELossFunction lossFunction, double alpha = 0.5);
+
+THolder<IMetric> MakeExpectileMetric(ELossFunction lossFunction, double alpha = 0.5);
 
 THolder<IMetric> MakeLogLinQuantileMetric(double alpha = 0.5);
 
@@ -252,34 +253,34 @@ THolder<IMetric> MakeQueryCrossEntropyMetric(double alpha = 0.95);
 
 THolder<IMetric> MakePFoundMetric(int topSize = -1, double decay = 0.85);
 
-THolder<IMetric> MakeNdcgMetric(int topSize = -1, ENdcgMetricType type = ENdcgMetricType::Base);
+THolder<IMetric> MakeDcgMetric(int topSize = -1, ENdcgMetricType type = ENdcgMetricType::Base, bool normalized = true, ENdcgDenominatorType denominator = ENdcgDenominatorType::LogPosition);
 
 THolder<IMetric> MakeQuerySoftMaxMetric();
 
-THolder<IMetric> MakeStochasticFilterMetric();
+THolder<IMetric> MakeFilteredDcgMetric(ENdcgMetricType type, ENdcgDenominatorType denominator);
 
-THolder<IMetric> MakeBinClassAucMetric(double border = GetDefaultClassificationBorder());
+THolder<IMetric> MakeBinClassAucMetric(double border = GetDefaultTargetBorder());
 THolder<IMetric> MakeMultiClassAucMetric(int positiveClass);
 
-THolder<IMetric> MakeAccuracyMetric(double border = GetDefaultClassificationBorder());
+THolder<IMetric> MakeAccuracyMetric(double border = GetDefaultTargetBorder());
 
-THolder<IMetric> MakeBinClassPrecisionMetric(double border = GetDefaultClassificationBorder());
+THolder<IMetric> MakeBinClassPrecisionMetric(double border = GetDefaultTargetBorder());
 THolder<IMetric> MakeMultiClassPrecisionMetric(int positiveClass);
 
-THolder<IMetric> MakeBinClassRecallMetric(double border = GetDefaultClassificationBorder());
+THolder<IMetric> MakeBinClassRecallMetric(double border = GetDefaultTargetBorder());
 THolder<IMetric> MakeMultiClassRecallMetric(int positiveClass);
 
-THolder<IMetric> MakeBinClassBalancedAccuracyMetric(double border = GetDefaultClassificationBorder());
+THolder<IMetric> MakeBinClassBalancedAccuracyMetric(double border = GetDefaultTargetBorder());
 
-THolder<IMetric> MakeBinClassBalancedErrorRate(double border = GetDefaultClassificationBorder());
+THolder<IMetric> MakeBinClassBalancedErrorRate(double border = GetDefaultTargetBorder());
 
-THolder<IMetric> MakeBinClassKappaMetric(double border = GetDefaultClassificationBorder());
+THolder<IMetric> MakeBinClassKappaMetric(double border = GetDefaultTargetBorder());
 THolder<IMetric> MakeMultiClassKappaMetric(int classCount = 2);
 
-THolder<IMetric> MakeBinClassWKappaMetric(double border = GetDefaultClassificationBorder());
+THolder<IMetric> MakeBinClassWKappaMetric(double border = GetDefaultTargetBorder());
 THolder<IMetric> MakeMultiClassWKappaMetric(int classCount = 2);
 
-THolder<IMetric> MakeBinClassF1Metric(double border = GetDefaultClassificationBorder());
+THolder<IMetric> MakeBinClassF1Metric(double border = GetDefaultTargetBorder());
 THolder<IMetric> MakeMultiClassF1Metric(int positiveClass);
 
 THolder<IMetric> MakeTotalF1Metric(int classesCount = 2);
@@ -291,24 +292,24 @@ THolder<IMetric> MakeBrierScoreMetric();
 THolder<IMetric> MakeHingeLossMetric();
 
 THolder<IMetric> MakeHammingLossMetric(
-    double border = GetDefaultClassificationBorder(),
+    double border = GetDefaultTargetBorder(),
     bool isMulticlass = false);
 
 THolder<IMetric> MakeZeroOneLossMetric(
-    double border = GetDefaultClassificationBorder(),
+    double border = GetDefaultTargetBorder(),
     bool isMultiClass = false);
 
 THolder<IMetric> MakePairAccuracyMetric();
 
-THolder<IMetric> MakeMAPKMetric(int topSize = -1, double border = GetDefaultClassificationBorder());
+THolder<IMetric> MakeMAPKMetric(int topSize = -1, double border = GetDefaultTargetBorder());
 
 THolder<IMetric> MakeRecallAtKMetric(
     int topSize = -1,
-    double border = GetDefaultClassificationBorder());
+    double border = GetDefaultTargetBorder());
 
 THolder<IMetric> MakePrecisionAtKMetric(
     int topSize = -1,
-    double border = GetDefaultClassificationBorder());
+    double border = GetDefaultTargetBorder());
 
 THolder<IMetric> MakeCustomMetric(const TCustomMetricDescriptor& descriptor);
 
@@ -320,20 +321,20 @@ THolder<IMetric> MakeAverageGainMetric(float topSize);
 
 THolder<IMetric> MakeHuberLossMetric(double delta);
 
+THolder<IMetric> MakeBinClassNormalizedGiniMetric(double border);
+THolder<IMetric> MakeMultiClassNormalizedGiniMetric(int positiveClass);
+
+THolder<IMetric> MakeFairLossMetric(double smoothness);
+
 TVector<THolder<IMetric>> CreateMetricsFromDescription(const TVector<TString>& description, int approxDim);
 
 TVector<THolder<IMetric>> CreateMetricFromDescription(const NCatboostOptions::TLossDescription& description, int approxDimension);
-
-TVector<THolder<IMetric>> CreateDefaultMetricForObjective(
-    const NCatboostOptions::TLossDescription& objective,
-    int approxDimension);
 
 TVector<THolder<IMetric>> CreateMetrics(
     TConstArrayRef<NCatboostOptions::TLossDescription> metricDescriptions,
     int approxDim);
 
 TVector<THolder<IMetric>> CreateMetrics(
-    const NCatboostOptions::TOption<NCatboostOptions::TLossDescription>& lossFunctionOption,
     const NCatboostOptions::TOption<NCatboostOptions::TMetricOptions>& evalMetricOptions,
     const TMaybe<TCustomMetricDescriptor>& evalMetricDescriptor,
     int approxDimension);
@@ -351,7 +352,7 @@ TMetricHolder EvalErrors(
     TConstArrayRef<float> target,
     TConstArrayRef<float> weight,
     TConstArrayRef<TQueryInfo> queriesInfo,
-    const THolder<IMetric>& error,
+    const IMetric& error,
     NPar::TLocalExecutor* localExecutor
 );
 
@@ -362,7 +363,7 @@ TMetricHolder EvalErrors(
     TConstArrayRef<float> target,
     TConstArrayRef<float> weight,
     TConstArrayRef<TQueryInfo> queriesInfo,
-    const THolder<IMetric>& error,
+    const IMetric& error,
     NPar::TLocalExecutor* localExecutor
 );
 
@@ -373,11 +374,15 @@ inline bool IsMaxOptimal(const IMetric& metric) {
     return bestValueType == EMetricBestValue::Max;
 }
 
+bool IsMaxOptimal(TStringBuf lossFunction);
+
+bool IsMinOptimal(TStringBuf lossFunction);
+
 void CheckPreprocessedTarget(
     TConstArrayRef<float> target,
     const NCatboostOptions::TLossDescription& lossDesciption,
-    bool isLearnData,
-    bool allowConstLabel = false
+    bool isNonEmptyAndNonConst,
+    bool allowConstLabel
 );
 
 void CheckMetrics(const TVector<THolder<IMetric>>& metrics, const ELossFunction modelLoss);

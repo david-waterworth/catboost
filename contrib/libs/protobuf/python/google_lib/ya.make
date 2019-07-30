@@ -5,6 +5,11 @@ LICENSE(
 
 
 
+NO_CHECK_IMPORTS(
+    google.protobuf.internal.cpp_message
+    google.protobuf.pyext.cpp_message
+)
+
 NO_COMPILER_WARNINGS()
 
 NO_LINT()
@@ -90,7 +95,7 @@ SRCS(
     protobuf/pyext/repeated_scalar_container.cc
 )
 
-PY_REGISTER(google.protobuf.pyext._message=_message)
-PY_REGISTER(google.protobuf.internal._api_implementation=_api_implementation)
+PY_REGISTER(google.protobuf.pyext._message)
+PY_REGISTER(google.protobuf.internal._api_implementation)
 
 END()

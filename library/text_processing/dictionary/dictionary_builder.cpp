@@ -25,7 +25,7 @@ namespace NTextProcessing::NDictionary {
         }
         virtual void Add(TConstArrayRef<TString> tokens, ui64 weight) = 0;
         virtual void Add(TConstArrayRef<TStringBuf> tokens, ui64 weight) = 0;
-        virtual THolder<TDictionary> FinishBuilding() = 0;
+        virtual TIntrusivePtr<TDictionary> FinishBuilding() = 0;
 
         virtual ~IDictionaryBuilderImpl() = default;
     protected:
@@ -54,7 +54,7 @@ namespace NTextProcessing::NDictionary {
             AddImpl(tokens, weight);
         }
 
-        THolder<TDictionary> FinishBuilding() override;
+        TIntrusivePtr<TDictionary> FinishBuilding() override;
     private:
         template <typename TTokenType>
         void AddImpl(TConstArrayRef<TTokenType> tokens, ui64 weight);
@@ -87,7 +87,7 @@ namespace NTextProcessing::NDictionary {
             AddImpl(tokens, weight);
         }
 
-        THolder<TDictionary> FinishBuilding() override;
+        TIntrusivePtr<TDictionary> FinishBuilding() override;
     private:
         template <typename TTokenType>
         void AddImpl(TConstArrayRef<TTokenType> tokens, ui64 weight);
@@ -114,20 +114,19 @@ namespace NTextProcessing::NDictionary {
                 TokenToCount[token] += weight;
             }
         } else {
-            auto updateTokenToCountFunc = [&] (const TString& token) {
+            auto updateTokenToCountFunc = [&] (TStringBuf token) {
                 TokenToCount[token] += weight;
             };
             ApplyFuncToLetterNGrams(
                 tokens,
                 DictionaryOptions.GramOrder,
-                DictionaryOptions.SkipStep,
                 DictionaryOptions.EndOfWordTokenPolicy == EEndOfWordTokenPolicy::Insert,
                 updateTokenToCountFunc
             );
         }
     }
 
-    THolder<TDictionary> TUnigramDictionaryBuilderImpl::FinishBuilding() {
+    TIntrusivePtr<TDictionary> TUnigramDictionaryBuilderImpl::FinishBuilding() {
         Y_ENSURE(!IsBuildingFinish, "FinishBuilding method should be called only once.");
         IsBuildingFinish = true;
 
@@ -175,7 +174,7 @@ namespace NTextProcessing::NDictionary {
             std::move(IdToCount)
         );
 
-        return MakeHolder<TDictionary>(std::move(dictionaryImpl));
+        return MakeIntrusive<TDictionary>(std::move(dictionaryImpl));
     }
 
     // TMultigramDictionaryBuilderImpl
@@ -314,7 +313,7 @@ namespace NTextProcessing::NDictionary {
     }
 
     template <ui32 GramOrder>
-    THolder<TDictionary> TMultigramDictionaryBuilderImpl<GramOrder>::FinishBuilding() {
+    TIntrusivePtr<TDictionary> TMultigramDictionaryBuilderImpl<GramOrder>::FinishBuilding() {
         Y_ENSURE(!IsBuildingFinish, "FinishBuilding method should be called only once.");
         IsBuildingFinish = true;
 
@@ -332,7 +331,7 @@ namespace NTextProcessing::NDictionary {
             std::move(IdToCount)
         );
 
-        return MakeHolder<TDictionary>(std::move(dictionaryImpl));
+        return MakeIntrusive<TDictionary>(std::move(dictionaryImpl));
     }
 
     TDictionaryBuilder::TDictionaryBuilder(TDictionaryBuilder&&) = default;
@@ -342,6 +341,13 @@ namespace NTextProcessing::NDictionary {
         const TDictionaryBuilderOptions& dictionaryBuilderOptions,
         const TDictionaryOptions& dictionaryOptions
     ) {
+        Y_ENSURE(dictionaryOptions.GramOrder > 0, "GramOrder should be positive.");
+        Y_ENSURE(
+            dictionaryOptions.TokenLevelType == ETokenLevelType::Word ||
+            dictionaryOptions.SkipStep == 0,
+            "SkipStep should be equal to zero in case of Letter token level type."
+        );
+
         if (dictionaryOptions.GramOrder == 1 || dictionaryOptions.TokenLevelType == ETokenLevelType::Letter) {
             DictionaryBuilderImpl = MakeHolder<TUnigramDictionaryBuilderImpl>(dictionaryBuilderOptions, dictionaryOptions);
             return;
@@ -377,7 +383,7 @@ namespace NTextProcessing::NDictionary {
         DictionaryBuilderImpl->Add(tokens, weight);
     }
 
-    THolder<TDictionary> TDictionaryBuilder::FinishBuilding() {
+    TIntrusivePtr<TDictionary> TDictionaryBuilder::FinishBuilding() {
         return DictionaryBuilderImpl->FinishBuilding();
     }
 }

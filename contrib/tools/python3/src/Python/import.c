@@ -953,11 +953,10 @@ exec_code_in_module(PyObject *name, PyObject *module_dict, PyObject *code_object
     Py_DECREF(v);
 
     m = PyImport_GetModule(name);
-    if (m == NULL) {
+    if (m == NULL && !PyErr_Occurred()) {
         PyErr_Format(PyExc_ImportError,
                      "Loaded module %R not found in sys.modules",
                      name);
-        return NULL;
     }
 
     return m;
@@ -1415,6 +1414,7 @@ remove_importlib_frames(void)
 {
     const char *importlib_filename = "<frozen importlib._bootstrap>";
     const char *external_filename = "<frozen importlib._bootstrap_external>";
+    const char *importer_filename = "library/python/runtime_py3/importer.pxi";
     const char *remove_frames = "_call_with_frames_removed";
     int always_trim = 0;
     int in_importlib = 0;
@@ -1443,7 +1443,8 @@ remove_importlib_frames(void)
 
         assert(PyTraceBack_Check(tb));
         now_in_importlib = _PyUnicode_EqualToASCIIString(code->co_filename, importlib_filename) ||
-                           _PyUnicode_EqualToASCIIString(code->co_filename, external_filename);
+                           _PyUnicode_EqualToASCIIString(code->co_filename, external_filename) ||
+                           _PyUnicode_EqualToASCIIString(code->co_filename, importer_filename);
         if (now_in_importlib && !in_importlib) {
             /* This is the link to this chunk of importlib tracebacks */
             outer_link = prev_link;
@@ -1714,6 +1715,10 @@ PyImport_ImportModuleLevelObject(PyObject *name, PyObject *globals,
     }
 
     mod = PyImport_GetModule(abs_name);
+    if (mod == NULL && PyErr_Occurred()) {
+        goto error;
+    }
+
     if (mod != NULL && mod != Py_None) {
         _Py_IDENTIFIER(__spec__);
         _Py_IDENTIFIER(_initializing);
@@ -1801,9 +1806,11 @@ PyImport_ImportModuleLevelObject(PyObject *name, PyObject *globals,
                 final_mod = PyImport_GetModule(to_return);
                 Py_DECREF(to_return);
                 if (final_mod == NULL) {
-                    PyErr_Format(PyExc_KeyError,
-                                 "%R not in sys.modules as expected",
-                                 to_return);
+                    if (!PyErr_Occurred()) {
+                        PyErr_Format(PyExc_KeyError,
+                                     "%R not in sys.modules as expected",
+                                     to_return);
+                    }
                     goto error;
                 }
             }
@@ -1855,6 +1862,10 @@ PyImport_ReloadModule(PyObject *m)
     PyObject *reloaded_module = NULL;
     PyObject *imp = _PyImport_GetModuleId(&PyId_imp);
     if (imp == NULL) {
+        if (PyErr_Occurred()) {
+            return NULL;
+        }
+
         imp = PyImport_ImportModule("imp");
         if (imp == NULL) {
             return NULL;

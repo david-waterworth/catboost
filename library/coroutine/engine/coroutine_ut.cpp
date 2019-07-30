@@ -1,10 +1,13 @@
 #include "impl.h"
+#include "condvar.h"
+#include "network.h"
 
 #include <library/unittest/registar.h>
 
 #include <util/string/cast.h>
 #include <util/system/pipe.h>
 #include <util/system/env.h>
+#include <util/system/info.h>
 #include <util/generic/xrange.h>
 
 // TODO (velavokr): BALANCER-1345 add more tests on pollers
@@ -33,6 +36,9 @@ class TCoroTest: public TTestBase {
     UNIT_TEST(TestFastPathWakeSelect)
     UNIT_TEST(TestLegacyCancelYieldRaceBug)
     UNIT_TEST(TestJoinRescheduleBug);
+    UNIT_TEST(TestStackAlignmentLogic);
+    UNIT_TEST(TestStackCanaries);
+    UNIT_TEST(TestStackPages);
     UNIT_TEST_SUITE_END();
 
 public:
@@ -57,6 +63,9 @@ public:
     void TestFastPathWakeSelect();
     void TestLegacyCancelYieldRaceBug();
     void TestJoinRescheduleBug();
+    void TestStackAlignmentLogic();
+    void TestStackCanaries();
+    void TestStackPages();
 };
 
 void TCoroTest::TestException() {
@@ -290,7 +299,7 @@ namespace NCoroTestJoin {
 
         inline void operator()(TCont* c) {
             char buf = 0;
-            Result = c->ReadD(Sock, &buf, sizeof(buf), Deadline).Status();
+            Result = NCoro::ReadD(c, Sock, &buf, sizeof(buf), Deadline).Status();
         }
     };
 
@@ -320,7 +329,7 @@ namespace NCoroTestJoin {
 
         {
             TSleepCont sc = {TInstant::Max(), 0};
-            TJoinCont jc = {TDuration::MilliSeconds(100).ToDeadLine(), e.Create(sc, "sc")->ContPtr(), true};
+            TJoinCont jc = {TDuration::MilliSeconds(100).ToDeadLine(), e.Create(sc, "sc"), true};
 
             e.Execute(jc);
 
@@ -330,7 +339,7 @@ namespace NCoroTestJoin {
 
         {
             TSleepCont sc = {TDuration::MilliSeconds(100).ToDeadLine(), 0};
-            TJoinCont jc = {TDuration::MilliSeconds(200).ToDeadLine(), e.Create(sc, "sc")->ContPtr(), false};
+            TJoinCont jc = {TDuration::MilliSeconds(200).ToDeadLine(), e.Create(sc, "sc"), false};
 
             e.Execute(jc);
 
@@ -340,7 +349,7 @@ namespace NCoroTestJoin {
 
         {
             TSleepCont sc = {TDuration::MilliSeconds(200).ToDeadLine(), 0};
-            TJoinCont jc = {TDuration::MilliSeconds(100).ToDeadLine(), e.Create(sc, "sc")->ContPtr(), true};
+            TJoinCont jc = {TDuration::MilliSeconds(100).ToDeadLine(), e.Create(sc, "sc"), true};
 
             e.Execute(jc);
 
@@ -350,7 +359,7 @@ namespace NCoroTestJoin {
 
         {
             TReadCont rc = {TInstant::Max(), in.GetHandle(), 0};
-            TJoinCont jc = {TDuration::MilliSeconds(100).ToDeadLine(), e.Create(rc, "rc")->ContPtr(), true};
+            TJoinCont jc = {TDuration::MilliSeconds(100).ToDeadLine(), e.Create(rc, "rc"), true};
 
             e.Execute(jc);
 
@@ -360,7 +369,7 @@ namespace NCoroTestJoin {
 
         {
             TReadCont rc = {TDuration::MilliSeconds(100).ToDeadLine(), in.GetHandle(), 0};
-            TJoinCont jc = {TDuration::MilliSeconds(200).ToDeadLine(), e.Create(rc, "rc")->ContPtr(), false};
+            TJoinCont jc = {TDuration::MilliSeconds(200).ToDeadLine(), e.Create(rc, "rc"), false};
 
             e.Execute(jc);
 
@@ -370,7 +379,7 @@ namespace NCoroTestJoin {
 
         {
             TReadCont rc = {TDuration::MilliSeconds(200).ToDeadLine(), in.GetHandle(), 0};
-            TJoinCont jc = {TDuration::MilliSeconds(100).ToDeadLine(), e.Create(rc, "rc")->ContPtr(), true};
+            TJoinCont jc = {TDuration::MilliSeconds(100).ToDeadLine(), e.Create(rc, "rc"), true};
 
             e.Execute(jc);
 
@@ -427,7 +436,7 @@ namespace NCoroJoinCancelExitRaceBug {
         // 05.{Ready:[Aux,Sub2]} > SwitchTo(Aux)
         // 09.{Ready:[],Deleted:[Sub2]} > Cancel(Sub2) > {Ready:[Sub2],Deleted:[Sub2]}
         // 10.{Ready:[Sub2],Deleted:[Sub2]} > SwitchTo(Sub2) > FAIL: can not return from exit
-        cont->Join(sub2->ContPtr());
+        cont->Join(sub2);
 
         state.Sub = nullptr;
     }
@@ -442,7 +451,7 @@ namespace NCoroJoinCancelExitRaceBug {
         cont->Executor()->Create(DoAux, &state, "Aux");
 
         // 03.{Ready:[Sub,Aux]} > SwitchTo(Sub)
-        cont->Join(sub->ContPtr());
+        cont->Join(sub);
     }
 }
 
@@ -519,11 +528,11 @@ namespace NCoroWaitWakeLivelockBug {
         TState state;
 
         for (auto& subState : state.Subs) {
-            subState.Cont = cont->Executor()->Create(DoSub, &subState, subState.Name.data())->ContPtr();
+            subState.Cont = cont->Executor()->Create(DoSub, &subState, subState.Name.data());
         }
 
         cont->Join(
-            cont->Executor()->Create(DoStop, &state, "Stop")->ContPtr()
+            cont->Executor()->Create(DoStop, &state, "Stop")
         );
 
         for (auto& subState : state.Subs) {
@@ -576,7 +585,7 @@ namespace NCoroTestFastPathWake {
 
             TTempBuf tmp;
             // Wait for the event from io
-            auto res = cont->ReadD(state.In.GetHandle(), tmp.Data(), 1, TDuration::Seconds(10).ToDeadLine());
+            auto res = NCoro::ReadD(cont, state.In.GetHandle(), tmp.Data(), 1, TDuration::Seconds(10).ToDeadLine());
             UNIT_ASSERT_VALUES_EQUAL(res.Checked(), 0);
             state.IoSleepRunning = false;
         } catch (const NUnitTest::TAssertException& ex) {
@@ -610,7 +619,7 @@ namespace NCoroTestFastPathWake {
 
             // These guys are to be woken up right away
             for (auto& subState : state.Subs) {
-                subState.Cont = cont->Executor()->Create(DoSub, &subState, subState.Name.data())->ContPtr();
+                subState.Cont = cont->Executor()->Create(DoSub, &subState, subState.Name.data());
             }
 
             // Give way
@@ -637,7 +646,7 @@ namespace NCoroTestFastPathWake {
             state.Out.Close();
 
             if (state.IoSleepRunning) {
-                cont->Join(sleeper->ContPtr());
+                cont->Join(sleeper);
             }
 
             // Check everything has ended sooner than the timeout
@@ -700,8 +709,8 @@ namespace NCoroTestLegacyCancelYieldRaceBug {
 
     static void DoMain(TCont* cont, void* argPtr) {
         TState& state = *(TState*)argPtr;
-        TContRep* sub =  cont->Executor()->Create(DoSub, argPtr, "Sub");
-        sub->ContPtr()->Cancel();
+        TCont* sub =  cont->Executor()->Create(DoSub, argPtr, "Sub");
+        sub->Cancel();
         cont->Yield();
         UNIT_ASSERT_EQUAL(state.SubState, EState::Finished);
     }
@@ -757,7 +766,7 @@ namespace NCoroTestJoinRescheduleBug {
     static void DoSubA(TCont* cont, void* argPtr) {
         TState& state = *(TState*)argPtr;
         state.SubAState = EState::Running;
-        TCont* subC = cont->Executor()->Create(DoSubC, argPtr, "SubC")->ContPtr();
+        TCont* subC = cont->Executor()->Create(DoSubC, argPtr, "SubC");
         while (state.SubBState != EState::Running && state.SubCState != EState::Running) {
             cont->Yield();
         }
@@ -769,9 +778,9 @@ namespace NCoroTestJoinRescheduleBug {
 
     static void DoMain(TCont* cont, void* argPtr) {
         TState& state = *(TState*)argPtr;
-        TCont* subA = cont->Executor()->Create(DoSubA, argPtr, "SubA")->ContPtr();
+        TCont* subA = cont->Executor()->Create(DoSubA, argPtr, "SubA");
         state.SubA = subA;
-        cont->Join(cont->Executor()->Create(DoSubB, argPtr, "SubB")->ContPtr());
+        cont->Join(cont->Executor()->Create(DoSubB, argPtr, "SubB"));
 
         if (state.SubA) {
             subA->Cancel();
@@ -790,6 +799,65 @@ void TCoroTest::TestJoinRescheduleBug() {
     UNIT_ASSERT_EQUAL(state.SubAState, EState::Finished);
     UNIT_ASSERT_EQUAL(state.SubBState, EState::Finished);
     UNIT_ASSERT_EQUAL(state.SubCState, EState::Finished);
+}
+
+void TCoroTest::TestStackAlignmentLogic() {
+    char mem[4096 * 8] = {};
+
+    for (ui32 guardAlign : {32, 4096}) {
+        for (ui32 sz = 0; sz < 2 * guardAlign; sz += guardAlign / 32) {
+            UNIT_ASSERT_GE(NCoro::NPrivate::RawStackSize(sz, guardAlign), sz + 4 * guardAlign);
+        }
+
+        for (ui32 off = 0; off < 2 * guardAlign; off += guardAlign / 32) {
+            for (ui32 sz = 0; sz < 2 * guardAlign; sz += guardAlign / 32) {
+                const auto beg = mem + off;
+                const auto rawSz = NCoro::NPrivate::RawStackSize(sz, guardAlign);
+                const auto range = NCoro::NPrivate::AlignedRange(beg, rawSz, guardAlign);
+
+                // The range beginning is properly aligned
+                UNIT_ASSERT_EQUAL(range.data(), AlignUp(beg, guardAlign));
+                // The range end is also propery aligned
+                UNIT_ASSERT_VALUES_EQUAL(range.end(), AlignDown(range.end(), guardAlign));
+                // The range capacity is enough to accomodate 2 guard entities at the ends
+                UNIT_ASSERT_GE(range.size(), sz + 2 * guardAlign);
+            }
+        }
+    }
+}
+
+void TCoroTest::TestStackCanaries() {
+    {
+        NCoro::TStack s(1, NCoro::TStack::EGuard::Canary);
+        UNIT_ASSERT_GE(s.Get().size(), 32);
+        UNIT_ASSERT_VALUES_EQUAL(((size_t)s.Get().data()) & 31, 0);
+        memset(s.Get().data(), 0, s.Get().size());
+        UNIT_ASSERT(s.LowerCanaryOk());
+        UNIT_ASSERT(s.UpperCanaryOk());
+    }
+    {
+        NCoro::TStack s(1, NCoro::TStack::EGuard::Canary);
+        UNIT_ASSERT_GE(s.Get().size(), 32);
+        UNIT_ASSERT_VALUES_EQUAL(((size_t)s.Get().data()) & 31, 0);
+        memset(s.Get().data() - 1, 0, s.Get().size() + 1);
+        UNIT_ASSERT(!s.LowerCanaryOk());
+        UNIT_ASSERT(s.UpperCanaryOk());
+    }
+    {
+        NCoro::TStack s(1, NCoro::TStack::EGuard::Canary);
+        UNIT_ASSERT_GE(s.Get().size(), 32);
+        UNIT_ASSERT_VALUES_EQUAL(((size_t)s.Get().data()) & 31, 0);
+        memset(s.Get().data(), 0, s.Get().size() + 1);
+        UNIT_ASSERT(s.LowerCanaryOk());
+        UNIT_ASSERT(!s.UpperCanaryOk());
+    }
+}
+
+void TCoroTest::TestStackPages() {
+    NCoro::TStack s(1, NCoro::TStack::EGuard::Page);
+    UNIT_ASSERT_GE(s.Get().size(), NSystemInfo::GetPageSize());
+    UNIT_ASSERT_VALUES_EQUAL(((ptrdiff_t)s.Get().data()) & (NSystemInfo::GetPageSize() - 1), 0);
+    memset(s.Get().data(), 0, s.Get().size());
 }
 
 UNIT_TEST_SUITE_REGISTRATION(TCoroTest);

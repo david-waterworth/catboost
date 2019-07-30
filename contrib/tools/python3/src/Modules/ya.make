@@ -8,7 +8,6 @@ PEERDIR(
     ADDINCL contrib/libs/expat
     ADDINCL contrib/libs/libbz2
     ADDINCL contrib/libs/openssl
-    ADDINCL contrib/libs/sqlite3
     ADDINCL contrib/libs/zlib
     contrib/deprecated/libffi
 )
@@ -23,7 +22,7 @@ ADDINCL(
 
 NO_COMPILER_WARNINGS()
 
-NO_UTIL()
+NO_RUNTIME()
 
 SRCS(
     _abc.c
@@ -74,15 +73,6 @@ SRCS(
     _queuemodule.c
     _randommodule.c
     _sha3/sha3module.c
-    _sqlite/cache.c
-    _sqlite/connection.c
-    _sqlite/cursor.c
-    _sqlite/microprotocols.c
-    _sqlite/module.c
-    _sqlite/prepare_protocol.c
-    _sqlite/row.c
-    _sqlite/statement.c
-    _sqlite/util.c
     _sre.c
     _ssl.c
     _stat.c

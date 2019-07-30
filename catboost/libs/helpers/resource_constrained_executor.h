@@ -40,10 +40,10 @@ namespace NCB {
 
     public:
         TResourceConstrainedExecutor(
-            NPar::TLocalExecutor& localExecutor,
             const TString& resourceName,
             TResourceUnit resourceQuota,
-            bool lenientMode
+            bool lenientMode,
+            NPar::TLocalExecutor* localExecutor
         );
 
         // waits until all tasks are finished
@@ -51,7 +51,9 @@ namespace NCB {
 
         void Add(TFunctionWithResourceUsage&& functionWithResourceUsage);
 
-        // executes all tasks added so far until completion
+        /* Executes all tasks added so far until completion.
+         * It is possible to add tasks after that and call this method again.
+         */
         void ExecTasks();
 
     private:

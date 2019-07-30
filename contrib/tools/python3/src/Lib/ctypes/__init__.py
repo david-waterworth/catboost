@@ -280,7 +280,15 @@ def create_unicode_buffer(init, size=None):
     """
     if isinstance(init, str):
         if size is None:
-            size = len(init)+1
+            if sizeof(c_wchar) == 2:
+                # UTF-16 requires a surrogate pair (2 wchar_t) for non-BMP
+                # characters (outside [U+0000; U+FFFF] range). +1 for trailing
+                # NUL character.
+                size = sum(2 if ord(c) > 0xFFFF else 1 for c in init) + 1
+            else:
+                # 32-bit wchar_t (1 wchar_t per Unicode character). +1 for
+                # trailing NUL character.
+                size = len(init) + 1
         buftype = c_wchar * size
         buf = buftype()
         buf.value = init
@@ -450,15 +458,20 @@ class LibraryLoader(object):
 cdll = LibraryLoader(CDLL)
 pydll = LibraryLoader(PyDLL)
 
-if _os.name == "nt":
-    pythonapi = PyDLL("python dll", None, _sys.dllhandle)
-elif _sys.platform == "cygwin":
-    pythonapi = PyDLL("libpython%d.%d.dll" % _sys.version_info[:2])
-else:
+#if _os.name == "nt":
+#    pythonapi = PyDLL("python dll", None, _sys.dllhandle)
+#elif _sys.platform == "cygwin":
+#    pythonapi = PyDLL("libpython%d.%d.dll" % _sys.version_info[:2])
+#else:
+#    pythonapi = PyDLL(None)
+
+try:
+    pythonapi = PyDLL(None)
+except:
     try:
-        pythonapi = PyDLL(None)
-    except OSError:
         pythonapi = PyDLL(_find_library('python'))
+    except:
+        pythonapi = PyDLL(dict(name='python', symbols={}))
 
 
 if _os.name == "nt":

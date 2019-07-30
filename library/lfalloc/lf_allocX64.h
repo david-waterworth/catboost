@@ -40,6 +40,8 @@ static inline long AtomicSub(TAtomic& a, long b) {
     return AtomicAdd(a, -b);
 }
 
+#pragma comment(lib, "synchronization.lib")
+
 #ifndef NDEBUG
 #define Y_ASSERT_NOBT(x)           \
     {                              \
@@ -96,6 +98,8 @@ static inline long AtomicSub(TAtomic& a, long b) {
 #include <errno.h>
 
 #if defined(_linux_)
+#include <linux/futex.h>
+#include <sys/syscall.h>
 #if !defined(MADV_HUGEPAGE)
 #define MADV_HUGEPAGE 14
 #endif
@@ -257,7 +261,7 @@ static volatile int freeChunkCount;
 static void AddFreeChunk(uintptr_t chunkId) {
     chunkSizeIdx[chunkId] = -1;
     if (Y_UNLIKELY(freeChunkCount == FREE_CHUNK_ARR_BUF))
-        NMalloc::AbortFromCorruptedAllocator(); // free chunks arrray overflowed
+        NMalloc::AbortFromCorruptedAllocator("free chunks arrray overflowed");
     freeChunkArr[freeChunkCount++] = chunkId;
 }
 
@@ -299,7 +303,7 @@ enum EMMapMode {
 #ifndef _MSC_VER
 inline void VerifyMmapResult(void* result) {
     if (Y_UNLIKELY(result == MAP_FAILED))
-        NMalloc::AbortFromCorruptedAllocator(); // negative size requested? or just out of mem
+        NMalloc::AbortFromCorruptedAllocator("negative size requested? or just out of mem");
 }
 #endif
 
@@ -332,8 +336,7 @@ static char* AllocWithMMapLinuxImpl(uintptr_t sz, EMMapMode mode) {
         char* nextAllocPtr = prevAllocPtr + sz;
         if (uintptr_t(nextAllocPtr - (char*)nullptr) >= areaFinish) {
             if (Y_UNLIKELY(wrapped)) {
-                // virtual memory is over fragmented
-                NMalloc::AbortFromCorruptedAllocator();
+                NMalloc::AbortFromCorruptedAllocator("virtual memory is over fragmented");
             }
             // wrap after all area is used
             DoCas(areaPtr, areaStart, prevAllocPtr);
@@ -364,15 +367,15 @@ static char* AllocWithMMap(uintptr_t sz, EMMapMode mode) {
 #ifdef _MSC_VER
     char* largeBlock = (char*)VirtualAlloc(0, sz, MEM_RESERVE, PAGE_READWRITE);
     if (Y_UNLIKELY(largeBlock == nullptr))
-        NMalloc::AbortFromCorruptedAllocator(); // out of memory
+        NMalloc::AbortFromCorruptedAllocator("out of memory");
     if (Y_UNLIKELY(uintptr_t(((char*)largeBlock - ALLOC_START) + sz) >= N_MAX_WORKSET_SIZE))
-        NMalloc::AbortFromCorruptedAllocator(); // out of working set, something has broken
+        NMalloc::AbortFromCorruptedAllocator("out of working set, something has broken");
 #else
 #if defined(_freebsd_) || !defined(_64_)
     char* largeBlock = (char*)mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     VerifyMmapResult(largeBlock);
     if (Y_UNLIKELY(uintptr_t(((char*)largeBlock - ALLOC_START) + sz) >= N_MAX_WORKSET_SIZE))
-        NMalloc::AbortFromCorruptedAllocator(); // out of working set, something has broken
+        NMalloc::AbortFromCorruptedAllocator("out of working set, something has broken");
 #else
     char* largeBlock = AllocWithMMapLinuxImpl(sz, mode);
     if (TransparentHugePages) {
@@ -449,7 +452,7 @@ static void* LargeBlockAlloc(size_t _nSize, ELFAllocCounter counter) {
 #ifdef _MSC_VER
     char* pRes = (char*)VirtualAlloc(0, (pgCount + 1) * 4096ll, MEM_COMMIT, PAGE_READWRITE);
     if (Y_UNLIKELY(pRes == 0)) {
-        NMalloc::AbortFromCorruptedAllocator(); // out of memory
+        NMalloc::AbortFromCorruptedAllocator("out of memory");
     }
 #else
 
@@ -540,32 +543,116 @@ static void SystemFree(void* p) {
     LargeBlockFree(p, CT_SYSTEM_FREE);
 }
 
+
 //////////////////////////////////////////////////////////////////////////
-static int* volatile nLock = nullptr;
-static int nLockVar;
-inline void RealEnterCriticalDefault(int* volatile* lockPtr) {
-    while (DoCas(lockPtr, &nLockVar, (int*)nullptr) != nullptr)
-        ; //pthread_yield();
-}
-inline void RealLeaveCriticalDefault(int* volatile* lockPtr) {
-    *lockPtr = nullptr;
-}
-static void (*RealEnterCritical)(int* volatile* lockPtr) = RealEnterCriticalDefault;
-static void (*RealLeaveCritical)(int* volatile* lockPtr) = RealLeaveCriticalDefault;
-static void (*BeforeLFAllocGlobalLockAcquired)() = nullptr;
-static void (*AfterLFAllocGlobalLockReleased)() = nullptr;
-class CCriticalSectionLockMMgr {
-public:
-    CCriticalSectionLockMMgr() {
-        if (BeforeLFAllocGlobalLockAcquired) {
-            BeforeLFAllocGlobalLockAcquired();
-        }
-        RealEnterCritical(&nLock);
+char* const LF_LOCK_FREE = ((char*)0) + 0;
+char* const LF_LOCK_LOCKED = ((char*)0) + 1;
+char* const LF_LOCK_FUTEX_WAIT = ((char*)0) + 2;
+static bool LFHasFutex = true;
+static bool LFCheckedWinVersion = false;
+
+// TLFLockData has to be zero-initialized explicitly https://en.cppreference.com/w/cpp/language/zero_initialization
+// otherwise constructor TLFLockData() for global var might be called after first use
+struct TLFLockData
+{
+    char* Pad1[15];
+    char* volatile LockVar; // = LF_LOCK_FREE; // no constructor, zero-initialize manually
+    char* Pad2[15];
+
+    bool TryLock()
+    {
+        return (LockVar == LF_LOCK_FREE && DoCas(&LockVar, LF_LOCK_LOCKED, LF_LOCK_FREE) == LF_LOCK_FREE);
     }
-    ~CCriticalSectionLockMMgr() {
-        RealLeaveCritical(&nLock);
-        if (AfterLFAllocGlobalLockReleased) {
-            AfterLFAllocGlobalLockReleased();
+
+    void FutexWait()
+    {
+#ifdef _win_
+        if (!LFCheckedWinVersion) {
+            OSVERSIONINFOA ver;
+            memset(&ver, 0, sizeof(ver));
+            ver.dwOSVersionInfoSize = sizeof(OSVERSIONINFOA);
+            GetVersionExA(&ver);
+            LFHasFutex = (ver.dwMajorVersion > 6) || (ver.dwMajorVersion == 6 && ver.dwMinorVersion >= 2);
+            LFCheckedWinVersion = true;
+        }
+        if (LFHasFutex) {
+            if (LockVar == LF_LOCK_LOCKED) {
+                DoCas(&LockVar, LF_LOCK_FUTEX_WAIT, LF_LOCK_LOCKED);
+            }
+            if (LockVar == LF_LOCK_FUTEX_WAIT) {
+                char* lockedValue = LF_LOCK_FUTEX_WAIT;
+                WaitOnAddress(&LockVar, &lockedValue, sizeof(LockVar), INFINITE);
+            }
+        } else {
+            SwitchToThread();
+        }
+#elif defined(_linux_)
+        if (LFHasFutex) {
+            if (LockVar == LF_LOCK_LOCKED) {
+                DoCas(&LockVar, LF_LOCK_FUTEX_WAIT, LF_LOCK_LOCKED);
+            }
+            if (LockVar == LF_LOCK_FUTEX_WAIT) {
+                // linux allow only int variables checks, here we pretend low bits of LockVar are int
+                syscall(SYS_futex, &LockVar, FUTEX_WAIT_PRIVATE, *(int*)&LF_LOCK_FUTEX_WAIT, 0, 0, 0);
+            }
+        } else {
+            sched_yield();
+        }
+#else
+        sched_yield();
+#endif
+    }
+
+    void Unlock()
+    {
+        Y_ASSERT_NOBT(LockVar != LF_LOCK_FREE);
+        if (DoCas(&LockVar, LF_LOCK_FREE, LF_LOCK_LOCKED) != LF_LOCK_LOCKED) {
+            Y_ASSERT_NOBT(LockVar == LF_LOCK_FUTEX_WAIT && LFHasFutex);
+            LockVar = LF_LOCK_FREE;
+#ifdef _win_
+            WakeByAddressAll((PVOID)&LockVar);
+#elif defined(_linux_)
+            syscall(SYS_futex, &LockVar, FUTEX_WAKE_PRIVATE, INT_MAX, 0, 0, 0);
+#endif
+        }
+    }
+};
+
+static TLFLockData LFGlobalLock;
+
+
+class TLFLockHolder {
+    TLFLockData *LockData = nullptr;
+    int Attempt = 0;
+    int SleepMask = 0x7f;
+
+public:
+    TLFLockHolder() {}
+    TLFLockHolder(TLFLockData *lk) {
+        while (!TryLock(lk));
+    }
+    bool TryLock(TLFLockData *lk)
+    {
+        Y_ASSERT_NOBT(LockData == nullptr);
+        if (lk->TryLock()) {
+            LockData = lk;
+            return true;
+        }
+        if ((++Attempt & SleepMask) == 0) {
+            lk->FutexWait();
+            SleepMask = (SleepMask * 2 + 1) & 0x7fff;
+        } else {
+#ifdef _MSC_VER
+            _mm_pause();
+#elif defined(__i386) || defined(__x86_64__)
+            __asm__ __volatile__("pause");
+#endif
+        }
+        return false;
+    }
+    ~TLFLockHolder() {
+        if (LockData) {
+            LockData->Unlock();
         }
     }
 };
@@ -696,7 +783,7 @@ static bool DefragmentMem() {
     int* nFreeCount = (int*)SystemAlloc(N_CHUNKS * sizeof(int));
     if (Y_UNLIKELY(!nFreeCount)) {
         //__debugbreak();
-        NMalloc::AbortFromCorruptedAllocator();
+        NMalloc::AbortFromCorruptedAllocator("debugbreak");
     }
     memset(nFreeCount, 0, N_CHUNKS * sizeof(int));
 
@@ -800,11 +887,17 @@ enum EDefrag {
 static void* SlowLFAlloc(int nSizeIdx, int blockSize, EDefrag defrag) {
     IncrementCounter(CT_SLOW_ALLOC_CNT, 1);
 
-    CCriticalSectionLockMMgr ls;
-    void* res = LFAllocFromCurrentChunk(nSizeIdx, blockSize, 1);
-    if (res)
-        return res; // might happen when other thread allocated new current chunk
-
+    TLFLockHolder ls;
+    for (;;) {
+        bool locked = ls.TryLock(&LFGlobalLock);
+        void* res = LFAllocFromCurrentChunk(nSizeIdx, blockSize, 1);
+        if (res) {
+            return res; // might happen when other thread allocated new current chunk
+        }
+        if (locked) {
+            break;
+        }
+    }
     for (;;) {
         uintptr_t nChunk;
         if (GetFreeChunk(&nChunk)) {
@@ -1074,16 +1167,7 @@ struct TThreadAllocInfo {
 PERTHREAD TThreadAllocInfo* pThreadInfo;
 static TThreadAllocInfo* pThreadInfoList;
 
-static int* volatile nLockThreadInfo = nullptr;
-class TLockThreadListMMgr {
-public:
-    TLockThreadListMMgr() {
-        RealEnterCritical(&nLockThreadInfo);
-    }
-    ~TLockThreadListMMgr() {
-        RealLeaveCritical(&nLockThreadInfo);
-    }
-};
+static TLFLockData LFLockThreadInfo;
 
 static Y_FORCE_INLINE void IncrementCounter(ELFAllocCounter counter, size_t value) {
 #ifdef LFALLOC_YT
@@ -1108,7 +1192,7 @@ extern "C" i64 GetLFAllocCounterFull(int counter) {
 #ifdef LFALLOC_YT
     i64 ret = GlobalCounters[counter];
     {
-        TLockThreadListMMgr ll;
+        TLFLockHolder ll(&LFLockThreadInfo);
         for (TThreadAllocInfo** p = &pThreadInfoList; *p;) {
             TThreadAllocInfo* pInfo = *p;
             ret += pInfo->LocalCounters[counter].Value;
@@ -1138,7 +1222,7 @@ static bool IsDeadThread(TThreadAllocInfo* pInfo) {
 }
 
 static void CleanupAfterDeadThreads() {
-    TLockThreadListMMgr ls;
+    TLFLockHolder ll(&LFLockThreadInfo);
     for (TThreadAllocInfo** p = &pThreadInfoList; *p;) {
         TThreadAllocInfo* pInfo = *p;
         if (IsDeadThread(pInfo)) {
@@ -1160,7 +1244,7 @@ static PERTHREAD bool IsStoppingThread;
 static void FreeThreadCache(void*) {
     TThreadAllocInfo* pToDelete = nullptr;
     {
-        TLockThreadListMMgr ls;
+        TLFLockHolder ll(&LFLockThreadInfo);
         pToDelete = pThreadInfo;
         if (pToDelete == nullptr)
             return;
@@ -1195,7 +1279,7 @@ static void AllocThreadInfo() {
     {
         if (IsStoppingThread)
             return;
-        TLockThreadListMMgr ls;
+        TLFLockHolder ll(&LFLockThreadInfo);
         if (IsStoppingThread) // better safe than sorry
             return;
 
@@ -1206,8 +1290,8 @@ static void AllocThreadInfo() {
 #else
     CleanupAfterDeadThreads();
     {
-        TLockThreadListMMgr ls;
         pThreadInfo = (TThreadAllocInfo*)SystemAlloc(sizeof(TThreadAllocInfo));
+        TLFLockHolder ll(&LFLockThreadInfo);
         pThreadInfo->Init(&pThreadInfoList);
     }
 #endif
@@ -1381,7 +1465,7 @@ extern "C" void GetPerTagAllocInfo(
 
     if (info) {
         if (flushPerThreadCounters) {
-            TLockThreadListMMgr ll;
+            TLFLockHolder ll(&LFLockThreadInfo);
             for (TThreadAllocInfo** p = &pThreadInfoList; *p;) {
                 TThreadAllocInfo* pInfo = *p;
                 for (int tag = 0; tag < DBG_ALLOC_MAX_TAG; ++tag) {
@@ -1461,7 +1545,7 @@ static Y_FORCE_INLINE void* LFAllocImpl(size_t _nSize) {
         if (count == 0) {
             count = LFAllocNoCacheMultiple(nSizeIdx, buf);
             if (count == 0) {
-                NMalloc::AbortFromCorruptedAllocator(); // no way LFAllocNoCacheMultiple() can fail
+                NMalloc::AbortFromCorruptedAllocator("no way LFAllocNoCacheMultiple() can fail");
             }
         }
         char** dstBuf = thr->FreePtrs[nSizeIdx] + freePtrIdx - 1;
@@ -1705,7 +1789,7 @@ void DumpMemoryBlockUtilization() {
     // move current thread free to global lists to get better statistics
     FlushThreadFreeList();
     {
-        CCriticalSectionLockMMgr ls;
+        TLFLockHolder ls(&LFGlobalLock);
         DumpMemoryBlockUtilizationLocked();
     }
 }
@@ -1728,24 +1812,6 @@ static bool LFAlloc_SetParam(const char* param, const char* value) {
         return true;
     }
 #endif
-    if (!strcmp(param, "BeforeLFAllocGlobalLockAcquired")) {
-        BeforeLFAllocGlobalLockAcquired = (decltype(BeforeLFAllocGlobalLockAcquired))(value);
-        return true;
-    }
-    if (!strcmp(param, "AfterLFAllocGlobalLockReleased")) {
-        AfterLFAllocGlobalLockReleased = (decltype(AfterLFAllocGlobalLockReleased))(value);
-        return true;
-    }
-    if (!strcmp(param, "EnterCritical")) {
-        assert(value);
-        RealEnterCritical = (decltype(RealEnterCritical))(value);
-        return true;
-    }
-    if (!strcmp(param, "LeaveCritical")) {
-        assert(value);
-        RealLeaveCritical = (decltype(RealLeaveCritical))(value);
-        return true;
-    }
     if (!strcmp(param, "TransparentHugePages")) {
         TransparentHugePages = !strcmp(value, "true");
         return true;
@@ -1802,12 +1868,11 @@ static Y_FORCE_INLINE void* LFVAlloc(size_t size) {
 
 static Y_FORCE_INLINE int LFPosixMemalign(void** memptr, size_t alignment, size_t size) {
     if (Y_UNLIKELY(alignment > 4096)) {
+        const char* error = "Larger alignment are not guaranteed with this implementation\n";
 #ifdef _win_
-        OutputDebugStringA("Larger alignment are not guaranteed with this implementation\n");
-#else
-        fprintf(stderr, "Larger alignment are not guaranteed with this implementation\n");
+        OutputDebugStringA(error);
 #endif
-        NMalloc::AbortFromCorruptedAllocator();
+        NMalloc::AbortFromCorruptedAllocator(error);
     }
     size_t bigsize = size;
     if (bigsize <= alignment) {

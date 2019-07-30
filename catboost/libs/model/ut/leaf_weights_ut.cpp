@@ -1,5 +1,6 @@
 #include <catboost/libs/data_new/data_provider_builders.h>
 #include <catboost/libs/train_lib/train_model.h>
+#include <catboost/libs/model/model_export/model_exporter.h>
 
 #include <util/generic/xrange.h>
 
@@ -31,6 +32,7 @@ static TDataProviderPtr SmallFloatPool(EWeightsMode addWeights, ETargetDimMode m
             metaInfo.HasWeights = addWeights;
             metaInfo.FeaturesLayout = MakeIntrusive<TFeaturesLayout>(
                 (ui32)3,
+                TVector<ui32>{},
                 TVector<ui32>{},
                 TVector<TString>{});
 
@@ -76,6 +78,8 @@ static TFullModel TrainModelOnPool(TDataProviderPtr pool, ETargetDimMode multicl
         Nothing(),
         Nothing(),
         TDataProviders{pool, {pool}},
+        /*initModel*/ Nothing(),
+        /*initLearnProgress*/ nullptr,
         "",
         &model,
         {&evalResult});
@@ -117,7 +121,7 @@ static void RunTestWithParams(EWeightsMode addWeights, ETargetDimMode multiclass
     TDataProviderPtr floatPool = SmallFloatPool(addWeights, multiclass);
     TFullModel trainedModel = TrainModelOnPool(floatPool, multiclass);
     if (clearWeightsInModel) {
-        trainedModel.ObliviousTrees.LeafWeights.clear();
+        trainedModel.ObliviousTrees.GetMutable()->LeafWeights.clear();
     }
     TFullModel deserializedModel;
     if (exportToCBM) {
@@ -126,9 +130,9 @@ static void RunTestWithParams(EWeightsMode addWeights, ETargetDimMode multiclass
         deserializedModel = SaveLoadCoreML(trainedModel);
     }
     if (exportToCBM) {
-        CheckWeights(floatPool->RawTargetData.GetWeights(), deserializedModel.ObliviousTrees.LeafWeights);
+        CheckWeights(floatPool->RawTargetData.GetWeights(), deserializedModel.ObliviousTrees->LeafWeights);
     } else {
-        UNIT_ASSERT(deserializedModel.ObliviousTrees.LeafWeights.empty());
+        UNIT_ASSERT(deserializedModel.ObliviousTrees->LeafWeights.empty());
     }
 }
 

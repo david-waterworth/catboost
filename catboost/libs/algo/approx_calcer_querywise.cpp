@@ -1,9 +1,12 @@
 #include "approx_calcer_querywise.h"
 
-#include <catboost/libs/index_range/index_range.h>
 #include <catboost/libs/helpers/map_merge.h>
+#include <catboost/libs/index_range/index_range.h>
+
+#include <library/threading/local_executor/local_executor.h>
 
 #include <util/generic/cast.h>
+
 
 void CalculateDersForQueries(
     const TVector<double>& approxes,
@@ -74,7 +77,7 @@ template <ELeavesEstimation estimationMethod>
 static void AddMethodDersForLeaves(
     const TVector<TDers>& bucketDers,
     const TVector<double>& bucketWeights,
-    int iteration,
+    bool updateWeight,
     int leafCount,
     TVector<TSum>* buckets
 ) {
@@ -83,7 +86,7 @@ static void AddMethodDersForLeaves(
             AddMethodDer<estimationMethod>(
                 bucketDers[leafId],
                 bucketWeights[leafId],
-                iteration,
+                updateWeight,
                 &(*buckets)[leafId]
             );
         }
@@ -98,7 +101,7 @@ void AddLeafDersForQueries(
     int queryStartIndex,
     int queryEndIndex,
     ELeavesEstimation estimationMethod,
-    int iteration,
+    int recalcLeafWeights,
     TVector<TSum>* buckets,
     NPar::TLocalExecutor* localExecutor
 ) {
@@ -141,7 +144,7 @@ void AddLeafDersForQueries(
         AddMethodDersForLeaves<ELeavesEstimation::Newton>(
             bucketStats.first,
             bucketStats.second,
-            iteration,
+            recalcLeafWeights,
             leafCount,
             buckets
         );
@@ -150,7 +153,7 @@ void AddLeafDersForQueries(
         AddMethodDersForLeaves<ELeavesEstimation::Gradient>(
             bucketStats.first,
             bucketStats.second,
-            iteration,
+            recalcLeafWeights,
             leafCount,
             buckets
         );

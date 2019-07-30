@@ -28,6 +28,10 @@ namespace NCatboostCuda {
             return GetCpuMetric().GetErrorType();
         }
 
+        TMetricParam<bool>& GetUseWeights() const {
+            return CpuMetric->UseWeights;
+        }
+
         const NCatboostOptions::TLossDescription& GetMetricDescription() const {
             return MetricDescription;
         }
@@ -116,7 +120,6 @@ namespace NCatboostCuda {
                            NPar::TLocalExecutor* localExecutor) const;
     };
 
-    TVector<THolder<IGpuMetric>> CreateGpuMetrics(const NCatboostOptions::TOption<NCatboostOptions::TLossDescription>& lossFunctionOption,
-                                                  const NCatboostOptions::TOption<NCatboostOptions::TMetricOptions>& evalMetricOptions,
+    TVector<THolder<IGpuMetric>> CreateGpuMetrics(const NCatboostOptions::TOption<NCatboostOptions::TMetricOptions>& evalMetricOptions,
                                                   const ui32 cpuApproxDim);
 }

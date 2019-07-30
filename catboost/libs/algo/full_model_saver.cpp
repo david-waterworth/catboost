@@ -2,17 +2,21 @@
 
 #include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/helpers/vector_helpers.h>
+#include <catboost/libs/model/ctr_value_table.h>
 #include <catboost/libs/model/model.h>
+#include <catboost/libs/model/model_export/model_exporter.h>
 #include <catboost/libs/model/static_ctr_provider.h>
+#include <catboost/libs/options/catboost_options.h>
 #include <catboost/libs/options/enum_helpers.h>
 #include <catboost/libs/options/system_options.h>
+#include <catboost/libs/target/classification_target_helper.h>
 
 #include <library/svnversion/svnversion.h>
 #include <library/threading/local_executor/local_executor.h>
 
+#include <util/datetime/base.h>
 #include <util/generic/algorithm.h>
 #include <util/generic/guid.h>
-#include <util/datetime/base.h>
 #include <util/generic/hash_set.h>
 #include <util/generic/ptr.h>
 #include <util/generic/xrange.h>
@@ -34,18 +38,27 @@ namespace NCB {
         targetClassesCount->resize(ctrCount);
 
         for (ui32 ctrIdx = 0; ctrIdx < ctrCount; ++ctrIdx) {
-            NPar::ParallelFor(localExecutor, 0, (ui32)sampleCount, [&](int sample) {
-                (*learnTargetClasses)[ctrIdx][sample] = targetClassifiers[ctrIdx].GetTargetClass(targets[sample]);
-            });
+            NPar::ParallelFor(
+                localExecutor,
+                0,
+                (ui32)sampleCount,
+                [&](int sample) {
+                    (*learnTargetClasses)[ctrIdx][sample]
+                        = targetClassifiers[ctrIdx].GetTargetClass(targets[sample]);
+                }
+            );
 
             (*targetClassesCount)[ctrIdx] = targetClassifiers[ctrIdx].GetClassesCount();
         }
     }
 
     static bool NeedTargetClasses(const TFullModel& coreModel) {
-        return AnyOf(coreModel.ObliviousTrees.GetUsedModelCtrs(), [](const TModelCtr& modelCtr) {
-            return NeedTargetClassifier(modelCtr.Base.CtrType);
-        });
+        return AnyOf(
+            coreModel.ObliviousTrees->GetUsedModelCtrs(),
+            [](const TModelCtr& modelCtr) {
+                return NeedTargetClassifier(modelCtr.Base.CtrType);
+            }
+        );
     }
 
 
@@ -77,7 +90,7 @@ namespace NCB {
                 outDatasetDataForFinalCtrs->Data = std::move(TrainingData);
                 outDatasetDataForFinalCtrs->LearnPermutation = Nothing();
                 outDatasetDataForFinalCtrs->Targets =
-                    *outDatasetDataForFinalCtrs->Data.Learn->TargetData->GetTarget();
+                    *outDatasetDataForFinalCtrs->Data.Learn->TargetData->GetTargetForLoss();
 
                 *outFeatureCombinationToProjection = &FeatureCombinationToProjection;
 
@@ -115,6 +128,7 @@ namespace NCB {
 
     TCoreModelToFullModelConverter::TCoreModelToFullModelConverter(
         const NCatboostOptions::TCatBoostOptions& options,
+        const NCatboostOptions::TOutputFilesOptions& outputOptions,
         const TClassificationTargetHelper& classificationTargetHelper,
         ui64 ctrLeafCountLimit,
         bool storeAllSimpleCtrs,
@@ -126,6 +140,7 @@ namespace NCB {
         , CtrLeafCountLimit(ctrLeafCountLimit)
         , StoreAllSimpleCtrs(storeAllSimpleCtrs)
         , Options(options)
+        , outputOptions(outputOptions)
         , ClassificationTargetHelper(classificationTargetHelper)
     {}
 
@@ -204,30 +219,15 @@ namespace NCB {
             AnyOf(
                 formats,
                 [](EModelType format) {
-                    return format == EModelType::Python || format == EModelType::Cpp || format == EModelType::Json;
+                    return format == EModelType::Python ||
+                        format == EModelType::Cpp ||
+                        format == EModelType::Json;
                 }
             ),
             &fullModel
         );
 
-        const auto& featuresLayout = *LearnObjectsData->GetFeaturesLayout();
-        TVector<TString> featureIds = featuresLayout.GetExternalFeatureIds();
-
-        THashMap<ui32, TString> catFeaturesHashToString;
-        bool haveAvailableCatFeatures = false;
-        featuresLayout.IterateOverAvailableFeatures<EFeatureType::Categorical>(
-            [&] (TCatFeatureIdx catFeatureIdx) {
-                Y_UNUSED(catFeatureIdx);
-                haveAvailableCatFeatures = true;
-            }
-        );
-        if (haveAvailableCatFeatures) {
-            catFeaturesHashToString = MergeCatFeaturesHashToString(*LearnObjectsData);
-        }
-
-        for (const auto& format: formats) {
-            ExportModel(fullModel, fullModelPath, format, "", addFileFormatExtension, &featureIds, &catFeaturesHashToString);
-        }
+        ExportFullModel(fullModel, fullModelPath, LearnObjectsData.Get(), formats, addFileFormatExtension);
     }
 
     void TCoreModelToFullModelConverter::DoImpl(bool requiresStaticCtrProvider, TFullModel* dstModel) {
@@ -244,6 +244,9 @@ namespace NCB {
             NJson::TJsonValue jsonOptions(NJson::EJsonValueType::JSON_MAP);
             Options.Save(&jsonOptions);
             dstModel->ModelInfo["params"] = ToString(jsonOptions);
+            NJson::TJsonValue jsonOutputOptions(NJson::EJsonValueType::JSON_MAP);
+            outputOptions.Save(&jsonOutputOptions);
+            dstModel->ModelInfo["output_options"] = ToString(jsonOutputOptions);
             for (const auto& keyValue : Options.Metadata.Get().GetMap()) {
                 dstModel->ModelInfo[keyValue.first] = keyValue.second.GetString();
             }
@@ -285,7 +288,7 @@ namespace NCB {
             CalcFinalCtrs(
                 datasetDataForFinalCtrs,
                 *featureCombinationToProjectionMap,
-                dstModel->ObliviousTrees.GetUsedModelCtrBases(),
+                dstModel->ObliviousTrees->GetUsedModelCtrBases(),
                 [&dstModel, &lock](TCtrValueTable&& table) {
                     with_lock(lock) {
                         dstModel->CtrProvider->AddCtrCalcerData(std::move(table));
@@ -296,7 +299,7 @@ namespace NCB {
             dstModel->UpdateDynamicData();
         } else {
             dstModel->CtrProvider = new TStaticCtrOnFlightSerializationProvider(
-                dstModel->ObliviousTrees.GetUsedModelCtrBases(),
+                dstModel->ObliviousTrees->GetUsedModelCtrBases(),
                 [this,
                  datasetDataForFinalCtrs = std::move(datasetDataForFinalCtrs),
                  featureCombinationToProjectionMap] (
@@ -328,7 +331,6 @@ namespace NCB {
 
         CalcFinalCtrsAndSaveToModel(
             CpuRamLimit,
-            localExecutor,
             featureCombinationToProjectionMap,
             datasetDataForFinalCtrs,
             *PerfectHashedToHashedCatValuesMap,
@@ -336,7 +338,54 @@ namespace NCB {
             StoreAllSimpleCtrs,
             Options.CatFeatureParams.Get().CounterCalcMethod,
             ctrBases,
-            std::move(asyncCtrValueTableCallback)
+            std::move(asyncCtrValueTableCallback),
+            &localExecutor
         );
     };
+
+    void ExportFullModel(
+        const TFullModel& fullModel,
+        const TString& fullModelPath,
+        const TMaybe<const TObjectsDataProvider*> allLearnObjectsData,
+        TConstArrayRef<EModelType> formats,
+        bool addFileFormatExtension
+    ) {
+        TFeaturesLayout featuresLayout(
+            fullModel.ObliviousTrees->FloatFeatures,
+            fullModel.ObliviousTrees->CatFeatures
+        );
+        TVector<TString> featureIds = featuresLayout.GetExternalFeatureIds();
+
+        THashMap<ui32, TString> catFeaturesHashToString;
+        if (fullModel.GetUsedCatFeaturesCount()) {
+            const bool anyExportFormatRequiresCatFeaturesHashToString = AnyOf(
+                formats,
+                [] (EModelType format) {
+                    return format == EModelType::Python ||
+                        format == EModelType::Cpp ||
+                        format == EModelType::Json;
+                }
+            );
+            if (anyExportFormatRequiresCatFeaturesHashToString) {
+                CB_ENSURE(
+                    allLearnObjectsData,
+                    "Some of the specified model export formats require all categorical features values data"
+                    " which is not available (probably due to the training continuation on a different dataset)"
+                );
+                catFeaturesHashToString = MergeCatFeaturesHashToString(**allLearnObjectsData);
+            }
+        }
+
+        for (const auto& format: formats) {
+            NCB::ExportModel(
+                fullModel,
+                fullModelPath,
+                format,
+                "",
+                addFileFormatExtension,
+                &featureIds,
+                &catFeaturesHashToString
+            );
+        }
+    }
 }

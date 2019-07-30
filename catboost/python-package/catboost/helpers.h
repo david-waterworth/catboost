@@ -5,7 +5,11 @@
 #include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/metrics/metric.h>
 #include <catboost/libs/options/loss_description.h>
+#include <catboost/libs/options/plain_options_helper.h>
 #include <catboost/libs/target/data_providers.h>
+#include <catboost/libs/train_lib/options_helper.h>
+
+#include <library/json/json_value.h>
 
 #include <util/generic/noncopyable.h>
 
@@ -49,9 +53,10 @@ TVector<double> EvalMetricsForUtils(
     const TString& metricName,
     const TVector<float>& weight,
     const TVector<TGroupId>& groupId,
+    const TVector<TSubgroupId>& subgroupId,
+    const TVector<TPair>& pairs,
     int threadCount
 );
-
 
 inline TVector<NCatboostOptions::TLossDescription> CreateMetricLossDescriptions(
     const TVector<TString>& metricDescriptions) {
@@ -79,16 +84,16 @@ public:
                                     bool deleteTempDirOnExit = false)
     : Rand(0)
     , MetricLossDescriptions(CreateMetricLossDescriptions(metricDescriptions))
-    , Metrics(CreateMetrics(MetricLossDescriptions, model.ObliviousTrees.ApproxDimension))
+    , Metrics(CreateMetrics(MetricLossDescriptions, model.GetDimensionsCount()))
     , MetricPlotCalcer(CreateMetricCalcer(
             model,
             begin,
             end,
             evalPeriod,
             /*processedIterationsStep=*/-1,
-            Executor,
             tmpDir,
-            Metrics)) {
+            Metrics,
+            &Executor)) {
         Executor.RunAdditionalThreads(threadCount - 1);
         MetricPlotCalcer.SetDeleteTmpDirOnExit(deleteTempDirOnExit);
     }
@@ -137,3 +142,11 @@ private:
     TVector<THolder<IMetric>> Metrics;
     TMetricsPlotCalcer MetricPlotCalcer;
 };
+
+NJson::TJsonValue GetTrainingOptions(
+    const NJson::TJsonValue& plainJsonParams,
+    const NCB::TDataMetaInfo& trainDataMetaInfo,
+    const TMaybe<NCB::TDataMetaInfo>& testDataMetaInfo
+);
+
+NJson::TJsonValue GetPlainJsonWithAllOptions(const TFullModel& model, bool hasCatFeatures);

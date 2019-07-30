@@ -1,5 +1,8 @@
 #include "helpers.h"
 
+#include "learn_context.h"
+
+#include <catboost/libs/data_new/quantized_features_info.h>
 #include <catboost/libs/distributed/master.h>
 #include <catboost/libs/logging/logging.h>
 
@@ -29,8 +32,8 @@ static TVector<TFeature> CreateFeatures(
         }
 
         TFeature feature;
-        feature.FeatureIndex = (int)*featuresLayout.GetInternalFeatureIdx<FeatureType>(flatFeatureIdx);
-        feature.FlatFeatureIndex = flatFeatureIdx;
+        feature.Position.Index = (int)*featuresLayout.GetInternalFeatureIdx<FeatureType>(flatFeatureIdx);
+        feature.Position.FlatIndex = flatFeatureIdx;
         feature.FeatureId = featureMetaInfo.Name;
 
         if (featureMetaInfo.IsAvailable) {
@@ -48,13 +51,13 @@ TVector<TFloatFeature> CreateFloatFeatures(const NCB::TQuantizedFeaturesInfo& qu
     return CreateFeatures<TFloatFeature, EFeatureType::Float>(
         quantizedFeaturesInfo,
         [&] (TFloatFeature& floatFeature) {
-            const auto floatFeatureIdx = TFloatFeatureIdx((ui32)floatFeature.FeatureIndex);
+            const auto floatFeatureIdx = TFloatFeatureIdx((ui32)floatFeature.Position.Index);
             auto nanMode = quantizedFeaturesInfo.GetNanMode(floatFeatureIdx);
             if (nanMode == ENanMode::Min) {
-                floatFeature.NanValueTreatment = NCatBoostFbs::ENanValueTreatment_AsFalse;
+                floatFeature.NanValueTreatment = TFloatFeature::ENanValueTreatment::AsFalse;
                 floatFeature.HasNans = true;
             } else if (nanMode == ENanMode::Max) {
-                floatFeature.NanValueTreatment = NCatBoostFbs::ENanValueTreatment_AsTrue;
+                floatFeature.NanValueTreatment = TFloatFeature::ENanValueTreatment::AsTrue;
                 floatFeature.HasNans = true;
             }
 
@@ -79,6 +82,38 @@ void ConfigureMalloc() {
 #endif
 }
 
+
+static bool IsTargetBinarizationNeeded(const TString& lossFunction) {
+    return TStringBuf(lossFunction).Before(':') == "Logloss";
+}
+
+
+double CalcMetric(
+    const IMetric& metric,
+    const TTargetDataProviderPtr& targetData,
+    const TVector<TVector<double>>& approx,
+    NPar::TLocalExecutor* localExecutor
+) {
+    CB_ENSURE(
+        approx[0].size() == targetData->GetObjectCount(),
+        "Approx size and object count must be equal"
+    );
+    //TODO(isaf27): will be removed after MLTOOLS-3572
+    auto target = (IsTargetBinarizationNeeded(metric.GetDescription()) ? targetData->GetTargetForLoss() : targetData->GetTarget()).GetOrElse(TConstArrayRef<float>());
+    auto weights = GetWeights(*targetData);
+    auto queryInfo = targetData->GetGroupInfo().GetOrElse(TConstArrayRef<TQueryInfo>());
+    const auto& additiveStats = EvalErrors(
+        approx,
+        target,
+        weights,
+        queryInfo,
+        metric,
+        localExecutor
+    );
+    return metric.GetFinalError(additiveStats);
+}
+
+
 void CalcErrors(
     const TTrainingForCPUDataProviders& trainingDataProviders,
     const TVector<THolder<IMetric>>& errors,
@@ -87,27 +122,31 @@ void CalcErrors(
     TLearnContext* ctx
 ) {
     if (trainingDataProviders.Learn->GetObjectCount() > 0) {
-        ctx->LearnProgress.MetricsAndTimeHistory.LearnMetricsHistory.emplace_back();
+        ctx->LearnProgress->MetricsAndTimeHistory.LearnMetricsHistory.emplace_back();
         if (calcAllMetrics) {
             if (ctx->Params.SystemOptions->IsSingleHost()) {
                 const auto& targetData = trainingDataProviders.Learn->TargetData;
 
                 auto target = targetData->GetTarget().GetOrElse(TConstArrayRef<float>());
+                auto targetForLoss = targetData->GetTargetForLoss().GetOrElse(TConstArrayRef<float>());
+
                 auto weights = GetWeights(*targetData);
                 auto queryInfo = targetData->GetGroupInfo().GetOrElse(TConstArrayRef<TQueryInfo>());
 
                 TVector<bool> skipMetricOnTrain = GetSkipMetricOnTrain(errors);
                 for (int i = 0; i < errors.ysize(); ++i) {
                     if (!skipMetricOnTrain[i]) {
+                        //TODO(isaf27): will be removed after MLTOOLS-3572
+                        const auto& currentTarget = IsTargetBinarizationNeeded(errors[i]->GetDescription()) ? targetForLoss : target;
                         const auto& additiveStats = EvalErrors(
-                            ctx->LearnProgress.AvrgApprox,
-                            target,
+                            ctx->LearnProgress->AvrgApprox,
+                            currentTarget,
                             weights,
                             queryInfo,
-                            errors[i],
+                            *errors[i],
                             ctx->LocalExecutor
                         );
-                        ctx->LearnProgress.MetricsAndTimeHistory.AddLearnError(
+                        ctx->LearnProgress->MetricsAndTimeHistory.AddLearnError(
                             *errors[i].Get(),
                             errors[i]->GetFinalError(additiveStats)
                         );
@@ -122,7 +161,7 @@ void CalcErrors(
     const int errorTrackerMetricIdx = calcErrorTrackerMetric ? 0 : -1;
 
     if (trainingDataProviders.GetTestSampleCount() > 0) {
-        ctx->LearnProgress.MetricsAndTimeHistory.TestMetricsHistory.emplace_back(); // new [iter]
+        ctx->LearnProgress->MetricsAndTimeHistory.TestMetricsHistory.emplace_back(); // new [iter]
         for (size_t testIdx = 0; testIdx < trainingDataProviders.Test.size(); ++testIdx) {
             const auto& testDataPtr = trainingDataProviders.Test[testIdx];
 
@@ -137,10 +176,11 @@ void CalcErrors(
 
             auto maybeTarget = targetData->GetTarget();
             auto target = maybeTarget.GetOrElse(TConstArrayRef<float>());
+            auto targetForLoss = targetData->GetTargetForLoss().GetOrElse(TConstArrayRef<float>());
             auto weights = GetWeights(*targetData);
             auto queryInfo = targetData->GetGroupInfo().GetOrElse(TConstArrayRef<TQueryInfo>());;
 
-            const auto& testApprox = ctx->LearnProgress.TestApprox[testIdx];
+            const auto& testApprox = ctx->LearnProgress->TestApprox[testIdx];
             for (int i = 0; i < errors.ysize(); ++i) {
                 if (!calcAllMetrics && (i != errorTrackerMetricIdx)) {
                     continue;
@@ -149,16 +189,19 @@ void CalcErrors(
                     continue;
                 }
 
+                //TODO(isaf27): will be removed after MLTOOLS-3572
+                const auto& currentTarget = IsTargetBinarizationNeeded(errors[i]->GetDescription()) ? targetForLoss : target;
+
                 const auto& additiveStats = EvalErrors(
                     testApprox,
-                    target,
+                    currentTarget,
                     weights,
                     queryInfo,
-                    errors[i],
+                    *errors[i],
                     ctx->LocalExecutor
                 );
                 bool updateBestIteration = (i == 0) && (testIdx == trainingDataProviders.Test.size() - 1);
-                ctx->LearnProgress.MetricsAndTimeHistory.AddTestError(
+                ctx->LearnProgress->MetricsAndTimeHistory.AddTestError(
                     testIdx,
                     *errors[i].Get(),
                     errors[i]->GetFinalError(additiveStats),

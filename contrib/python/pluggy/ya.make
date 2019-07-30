@@ -2,7 +2,7 @@ PY23_LIBRARY()
 
 
 
-VERSION(0.8.0)
+VERSION(0.9.0)
 
 LICENSE(MIT)
 
@@ -18,4 +18,14 @@ PY_SRCS(
     pluggy/manager.py
 )
 
+RESOURCE_FILES(
+    PREFIX contrib/python/pluggy/
+    .dist-info/METADATA
+    .dist-info/top_level.txt
+)
+
 END()
+
+RECURSE_FOR_TESTS(
+    tests
+)

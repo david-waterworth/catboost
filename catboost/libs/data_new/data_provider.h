@@ -7,6 +7,7 @@
 
 #include <catboost/libs/helpers/parallel_tasks.h>
 #include <catboost/libs/helpers/serialization.h>
+#include <catboost/libs/feature_estimator/feature_estimator.h>
 
 #include <library/binsaver/bin_saver.h>
 #include <library/dbg_output/dump.h>
@@ -350,13 +351,15 @@ namespace NCB {
 
             ExecuteTasksInParallel(&tasks, localExecutor);
 
-
-            return MakeIntrusive<TProcessedDataProviderTemplate>(
+            auto subset = MakeIntrusive<TProcessedDataProviderTemplate>(
                 TDataMetaInfo(MetaInfo), // assuming copying it is not very expensive
                 objectsDataSubset->GetObjectsGrouping(),
                 std::move(objectsDataSubset),
                 std::move(targetDataSubset)
             );
+            subset->UpdateMetaInfo();
+
+            return subset;
         }
 
         template <class TNewObjectsDataProvider>
@@ -369,6 +372,18 @@ namespace NCB {
             newDataProvider.ObjectsData = newObjectsDataProvider;
             newDataProvider.TargetData = TargetData;
             return newDataProvider;
+        }
+
+        void UpdateMetaInfo() {
+            MetaInfo.ObjectCount = GetObjectCount();
+            MetaInfo.MaxCatFeaturesUniqValuesOnLearn =
+                ObjectsData->GetQuantizedFeaturesInfo()->CalcMaxCategoricalFeaturesUniqueValuesCountOnLearn();
+
+            const auto& targets = TargetData->GetTargetForLoss();
+            if (targets.Defined() && !targets->empty()) {
+                auto targetBounds = CalcMinMax(*targets);
+                MetaInfo.TargetStats = {targetBounds.Min, targetBounds.Max};
+            }
         }
     };
 
@@ -428,6 +443,47 @@ namespace NCB {
         return testOffsets;
     }
 
+    template <class TDataProvidersTemplate>
+    TDataProvidersTemplate CreateTrainTestSubsets(
+        typename TDataProvidersTemplate::TDataPtr srcData,
+        NCB::TArraySubsetIndexing<ui32>&& trainIndices,
+        NCB::TArraySubsetIndexing<ui32>&& testIndices,
+        NPar::TLocalExecutor* localExecutor
+    ) {
+
+        const NCB::EObjectsOrder objectsOrder = NCB::EObjectsOrder::Ordered;
+        TDataProvidersTemplate result;
+
+        TVector<std::function<void()>> tasks;
+        tasks.emplace_back(
+            [&]() {
+                result.Learn = srcData->GetSubset(
+                    GetSubset(
+                        srcData->ObjectsGrouping,
+                        std::move(trainIndices),
+                        objectsOrder
+                    ),
+                    localExecutor
+                );
+            }
+        );
+        tasks.emplace_back(
+            [&]() {
+                result.Test.emplace_back(
+                    srcData->GetSubset(
+                        GetSubset(
+                            srcData->ObjectsGrouping,
+                            std::move(testIndices),
+                            objectsOrder
+                        ),
+                        localExecutor
+                    )
+                );
+            }
+        );
+        NCB::ExecuteTasksInParallel(&tasks, localExecutor);
+        return result;
+    }
 
     template <class TTObjectsDataProvider>
     class TTrainingDataProvidersTemplate {
@@ -438,6 +494,7 @@ namespace NCB {
 
         TTrainingDataProviderTemplatePtr Learn;
         TVector<TTrainingDataProviderTemplatePtr> Test;
+        TFeatureEstimators FeatureEstimators;
 
     public:
         SAVELOAD_WITH_SHARED(Learn, Test)
@@ -466,6 +523,14 @@ namespace NCB {
                 );
             }
             return newData;
+        }
+
+        ui32 CalcFeaturesCheckSum(NPar::TLocalExecutor* localExecutor) const {
+            ui32 checkSum = Learn->ObjectsData->CalcFeaturesCheckSum(localExecutor);
+            for (const auto& testData : Test) {
+                checkSum += testData->ObjectsData->CalcFeaturesCheckSum(localExecutor);
+            }
+            return checkSum;
         }
     };
 

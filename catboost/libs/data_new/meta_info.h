@@ -36,10 +36,19 @@ namespace NCB {
         TVector<TString> GenerateFeatureIds(const TMaybe<TVector<TString>>& header) const;
     };
 
+    struct TTargetStats {
+        float MinValue = 0;
+        float MaxValue = 0;
+    };
+
     struct TDataMetaInfo {
+        ui64 ObjectCount = 0;
+
         TFeaturesLayoutPtr FeaturesLayout;
+        ui64 MaxCatFeaturesUniqValuesOnLearn = 0;
 
         bool HasTarget = false;
+        TMaybe<TTargetStats> TargetStats;
 
         ui32 BaselineCount = 0;
 
@@ -50,7 +59,7 @@ namespace NCB {
         bool HasTimestamp = false;
         bool HasPairs = false;
 
-        // can be set if baseline file header contains such information
+        // can be set from baseline file header or from quantized pool
         TVector<TString> ClassNames = {};
 
         // set only for dsv format pools

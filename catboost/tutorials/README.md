@@ -18,7 +18,7 @@ It's better to start CatBoost exploring from this basic tutorials.
 
 ### Command line
 
-* [Command Line Tutorial](cmdline_tutorial.md)
+* [Command Line Tutorial](cmdline_tutorial/cmdline_tutorial.md)
     * This tutorial shows how to train and apply model with the command line tool.
 
 ## Classification
@@ -37,10 +37,19 @@ It's better to start CatBoost exploring from this basic tutorials.
 ## Model analysis
 
 * [Object Importance Tutorial](model_analysis/object_importance_tutorial.ipynb)
-    * This tutorial shows how to evaluate importances of the train objects for test objects. And with using of importance scores detect noisy train objects.
+    * This tutorial shows how to evaluate importances of the train objects for test objects, and how to detect broken train objects by using the importance scores.
 
 * [SHAP Values Tutorial](model_analysis/shap_values_tutorial.ipynb)
     * This tutorial shows how to use [SHAP](https://github.com/slundberg/shap) python-package to get and visualize feature importances.
+
+* [Export CatBoost Model in JSON format Tutorial](model_analysis/model_export_as_json_tutorial.ipynb)
+    * This tutorial shows how to save catboost model in JSON format and apply it.
+
+* [Visualization of CatBoost decision trees tutorial](model_analysis/visualize_decision_trees_tutorial.ipynb)
+    * This tutorial shows how to visualize catboost decision trees.
+
+* [Feature statistics tutorial](model_analysis/feature_statistics_tutorial.ipynb)
+    * This tutorial shows how to calculate feature statistics for catboost model.
 
 ## Custom loss
 
@@ -49,7 +58,7 @@ It's better to start CatBoost exploring from this basic tutorials.
 
 ## Apply model
 
-* [CatBoost CoreML Tutorial](apply_model/coreml_export_tutorial.ipynb)
+* [CatBoost CoreML Tutorial](apply_model/coreml/coreml_export_tutorial.ipynb)
     * Explore this tutorial to learn how to convert CatBoost model to CoreML format and use it on any iOS device.
 
 * [Export CatBoost Model as C++ code Tutorial](apply_model/model_export_as_cpp_code_tutorial.md)
@@ -58,13 +67,19 @@ It's better to start CatBoost exploring from this basic tutorials.
 * [Export CatBoost Model as Python code Tutorial](apply_model/model_export_as_python_code_tutorial.md)
     * Catboost model could be saved as standalone Python code.
 
-* [Export CatBoost Model in JSON format Tutorial](apply_model/model_export_as_json_tutorial.ipynb)
-    * Catboost model could be saved in JSON format and applied.
+* [Apply CatBoost model from Java](apply_model/java/train_model.ipynb)
+    * Explore how to apply CatBoost model from Java application. If you just want to look at code snippets you can go directly to [CatBoost4jPredictionTutorial.java](apply_model/java/src/main/java/CatBoost4jPredictionTutorial.java)
+
+* [Apply CatBoost model from Rust](apply_model/rust/train_model.ipynb)
+    * Explore how to apply CatBoost model from Rust application. If you just want to look at code snippets you can go directly to [main.rs](apply_model/rust/src/main.rs)
 
 ## Tools
 
-* [CatBoost on Google Colaboratory](tools/google_colaboratory_cpu_vs_gpu_tutorial.ipynb)
-    * Learn how to run CatBoost on CPU and GPU on Google Colaboratory and why GPU is the best choice.
+* [Gradient Boosting: CPU vs GPU](tools/google_colaboratory_cpu_vs_gpu_tutorial.ipynb)
+    * This is a basic tutorial which shows how to run gradient boosting on CPU and GPU on Google Colaboratory.
+
+* [Regression on Gradient Boosting: CPU vs GPU](tools/google_colaboratory_cpu_vs_gpu_regression_tutorial.ipynb)
+    * This is a basic tutorial which shows how to run regression on gradient boosting on CPU and GPU on Google Colaboratory.
 
 ## Competition examples
 
@@ -88,6 +103,15 @@ It's better to start CatBoost exploring from this basic tutorials.
 * [PyData LA tutorial](events/pydata_la_oct_21_2018.ipynb)
     * Tutorial from PyData Los Angeles, October 21, 2018.
 
-## Tutorials on Russian
+* [PyData Moscow tutorial](events/datastart_moscow_apr_27_2019.ipynb)
+    * Tutorial from PyData Moscow, April 27, 2019.
 
-* Find tutorials on Russian language on the separate [page](ru/README.md).
+* [PyData London tutorial](events/2019_pydata_london/pydata_london_2019.ipynb)
+    * Tutorial from PyData London, June 15, 2019.
+
+* [PyData Boston tutorial](events/2019_odsc_east/odsc_east_2019.ipynb)
+    * Tutorial from PyData Boston, April 30, 2019.
+
+## Tutorials in Russian
+
+* Find tutorials in Russian on the separate [page](ru/README.md).

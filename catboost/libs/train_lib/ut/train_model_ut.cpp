@@ -120,6 +120,8 @@ Y_UNIT_TEST_SUITE(TrainModelTests) {
                 {},
                 {},
                 std::move(dataProviders),
+                /*initModel*/ Nothing(),
+                /*initLearnProgress*/ nullptr,
                 "",
                 &model,
                 {&evalResult}
@@ -154,6 +156,8 @@ Y_UNIT_TEST_SUITE(TrainModelTests) {
             {},
             {},
             std::move(dataProviders),
+            /*initModel*/ Nothing(),
+            /*initLearnProgress*/ nullptr,
             "",
             &model,
             {&evalResult}
@@ -197,6 +201,7 @@ Y_UNIT_TEST_SUITE(TrainModelTests) {
                     metaInfo.FeaturesLayout = MakeIntrusive<TFeaturesLayout>(
                         numericFeatureCount,
                         TVector<ui32>{},
+                        TVector<ui32>{},
                         TVector<TString>{});
 
                     visitor->Start(metaInfo, objectCount, EObjectsOrder::Undefined, {});
@@ -227,6 +232,8 @@ Y_UNIT_TEST_SUITE(TrainModelTests) {
                 {},
                 {},
                 std::move(dataProviders),
+                /*initModel*/ Nothing(),
+                /*initLearnProgress*/ nullptr,
                 "",
                 &models[i],
                 {&evalResult}

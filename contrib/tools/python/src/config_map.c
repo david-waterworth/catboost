@@ -19,7 +19,6 @@
 {"_sha", init_sha},
 {"_sha256", init_sha256},
 {"_sha512", init_sha512},
-{"_sqlite3", init_sqlite3},
 {"_ssl", init_ssl},
 {"_struct", init_struct},
 {"array", initarray},
@@ -93,6 +92,6 @@
 {"_winreg", init_winreg},
 #endif
 
-#if !defined(_ARM_) && !defined(_CYGWIN_)
+#if defined(_x86_) && !defined(_CYGWIN_)
 {"_ctypes", init_ctypes},
 #endif

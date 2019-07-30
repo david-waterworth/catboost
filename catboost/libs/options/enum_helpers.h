@@ -4,44 +4,33 @@
 
 #include <util/generic/fwd.h>
 
-
 TConstArrayRef<ELossFunction> GetAllObjectives();
 
-bool IsSingleDimensionalCompatibleError(ELossFunction lossFunction);
+// metric type (regression, classification(bin, multi), ranking(pair, group))
+bool IsRegressionMetric(ELossFunction lossFunction);
 
-bool IsMultiDimensionalCompatibleError(ELossFunction lossFunction);
-
-bool IsForCrossEntropyOptimization(ELossFunction lossFunction);
-
-bool IsForOrderOptimization(ELossFunction lossFunction);
-
-bool IsForAbsoluteValueOptimization(ELossFunction lossFunction);
-
-bool IsOnlyForCrossEntropyOptimization(ELossFunction lossFunction);
-
-bool IsClassificationOnlyMetric(ELossFunction lossFunction);
-
+bool IsClassificationMetric(ELossFunction lossFunction);
 bool IsBinaryClassCompatibleMetric(ELossFunction lossFunction);
 bool IsMultiClassCompatibleMetric(ELossFunction lossFunction);
-
-// some metrics are both binclass and multiclass (e.g. HingeLoss)
+bool IsMultiClassCompatibleMetric(TStringBuf lossDescription);
+bool IsClassificationOnlyMetric(ELossFunction lossFunction);
 bool IsBinaryClassOnlyMetric(ELossFunction lossFunction);
 bool IsMultiClassOnlyMetric(ELossFunction lossFunction);
 
+bool IsRankingMetric(ELossFunction lossFunction);
+bool IsGroupwiseMetric(ELossFunction lossFunction);
+bool IsGroupwiseMetric(TStringBuf metricName);
+bool IsPairwiseMetric(ELossFunction lossFunction);
+bool IsPairwiseMetric(TStringBuf lossFunction);
+ERankingType GetRankingType(ELossFunction loss);
+
+// objective type
 bool IsClassificationObjective(ELossFunction lossFunction);
-
 bool IsClassificationObjective(TStringBuf lossDescription);
-
 bool IsRegressionObjective(ELossFunction lossFunction);
-
 bool IsRegressionObjective(TStringBuf lossDescription);
 
-bool IsRegressionMetric(ELossFunction lossFunction);
-
-bool IsGroupwiseMetric(ELossFunction lossFunction);
-
-bool IsPairwiseMetric(ELossFunction lossFunction);
-
+// various
 bool UsesPairsForCalculation(ELossFunction lossFunction);
 
 bool IsPlainMode(EBoostingType boostingType);
@@ -52,7 +41,7 @@ bool IsPairwiseScoring(ELossFunction lossFunction);
 
 bool IsGpuPlainDocParallelOnlyMode(ELossFunction lossFunction);
 
-bool ShouldGenerateYetiRankPairs(ELossFunction lossFunction);
+bool IsYetiRankLossFunction(ELossFunction lossFunction);
 
 bool IsPairLogit(ELossFunction lossFunction);
 
@@ -64,6 +53,12 @@ bool ShouldSkipCalcOnTrainByDefault(ELossFunction lossFunction);
 
 bool IsUserDefined(ELossFunction lossFunction);
 
+bool IsEmbeddingFeatureEstimator(EFeatureCalcerType estimatorType);
+
 bool ShouldSkipFstrGrowPolicy(EGrowPolicy growPolicy);
 
 bool IsPlainOnlyModeScoreFunction(EScoreFunction scoreFunction);
+
+bool ShouldBinarizeLabel(ELossFunction lossFunction);
+
+bool IsCvStratifiedObjective(TStringBuf lossDescription);

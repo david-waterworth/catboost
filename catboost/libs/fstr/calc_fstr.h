@@ -64,7 +64,7 @@ struct TFeature {
 
 public:
     TFeature() = default;
-    TFeature(const TFloatFeature& feature) : Type(ESplitType::FloatFeature), FeatureIdx(feature.FeatureIndex) {}
+    TFeature(const TFloatFeature& feature) : Type(ESplitType::FloatFeature), FeatureIdx(feature.Position.Index) {}
     TFeature(const TOneHotFeature& feature) : Type(ESplitType::OneHotFeature), FeatureIdx(feature.CatFeatureIndex) {}
     TFeature(const TCtrFeature& feature) : Type(ESplitType::OnlineCtr), Ctr(feature.Ctr) {}
 
@@ -130,17 +130,19 @@ TVector<TFeatureInteraction> CalcFeatureInteraction(
 
 TVector<TVector<double>> CalcInteraction(const TFullModel& model);
 TVector<TVector<double>> GetFeatureImportances(
-    const TString& type,
+    const EFstrType type,
     const TFullModel& model,
     const NCB::TDataProviderPtr dataset, // can be nullptr
     int threadCount,
+    EPreCalcShapValues mode,
     int logPeriod = 0);
 
 TVector<TVector<TVector<double>>> GetFeatureImportancesMulti(
-    const TString& type,
+    const EFstrType type,
     const TFullModel& model,
     const NCB::TDataProviderPtr dataset,
     int threadCount,
+    EPreCalcShapValues mode,
     int logPeriod = 0);
 
 
@@ -153,10 +155,6 @@ TVector<TVector<TVector<double>>> GetFeatureImportancesMulti(
 TVector<TString> GetMaybeGeneratedModelFeatureIds(
     const TFullModel& model,
     const NCB::TDataProviderPtr dataset); // can be nullptr
-
-bool TryGetLossDescription(const TFullModel& model, NCatboostOptions::TLossDescription& lossDescription);
-
-bool IsGroupwiseLearnedModel(const TFullModel& model);
 
 EFstrType GetFeatureImportanceType(
     const TFullModel& model,

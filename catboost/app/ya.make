@@ -9,6 +9,7 @@ SRCS(
     main.cpp
     mode_calc.cpp
     mode_eval_metrics.cpp
+    mode_eval_feature.cpp
     mode_fit.cpp
     mode_fstr.cpp
     mode_metadata.cpp
@@ -42,6 +43,7 @@ PEERDIR(
     library/json
     library/logger
     library/svnversion
+    library/text_processing/dictionary
 )
 
 IF(HAVE_CUDA)

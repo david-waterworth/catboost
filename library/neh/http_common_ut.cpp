@@ -1,5 +1,6 @@
 #include "neh.h"
 #include "http_common.h"
+#include "http_headers.h"
 
 #include <library/unittest/registar.h>
 
@@ -23,6 +24,44 @@ Y_UNIT_TEST_SUITE(THttpCommon) {
             UNIT_ASSERT(NNeh::NHttp::MakeFullRequest(msg, "", ""));
             UNIT_ASSERT_VALUES_EQUAL(msg.Addr, "fulls://localhost:3380/ntables");
         }
+    }
+
+    Y_UNIT_TEST(TMakeFullRequestWithHost) {
+        NNeh::TMessage msg = NNeh::TMessage::FromString("http://localhost:3380/ntables");
+        const TString headers =
+            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
+            "Host: yandex.ru\r\n";
+
+        UNIT_ASSERT(NNeh::NHttp::MakeFullRequest(msg, headers, ""));
+        UNIT_ASSERT(msg.Data.Contains("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"));
+        UNIT_ASSERT(msg.Data.Contains("Host: yandex.ru\r\n"));
+        UNIT_ASSERT(!msg.Data.Contains("Host: localhost"));
+    }
+
+    Y_UNIT_TEST(TMakeFullRequestWithHost2) {
+        NNeh::TMessage msg = NNeh::TMessage::FromString("http://localhost:3380/ntables");
+        const TString headers =
+            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
+            "X-Some-Header: Host:yandex.ru\r\n";
+
+        UNIT_ASSERT(NNeh::NHttp::MakeFullRequest(msg, headers, ""));
+        UNIT_ASSERT(msg.Data.Contains("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"));
+        UNIT_ASSERT(msg.Data.Contains("X-Some-Header: Host:yandex.ru\r\n"));
+        UNIT_ASSERT(msg.Data.Contains("Host: localhost:3380\r\n"));
+    }
+
+    Y_UNIT_TEST(TMakeFullRequestWithHost3) {
+        NNeh::TMessage msg = NNeh::TMessage::FromString("http://localhost:3380/ntables");
+        const TString headers =
+            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
+            "X-Some-Header: Host:yandex.ru\r\n"
+            "Host: yandex.ru";
+
+        UNIT_ASSERT(NNeh::NHttp::MakeFullRequest(msg, headers, ""));
+        UNIT_ASSERT(msg.Data.Contains("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"));
+        UNIT_ASSERT(msg.Data.Contains("X-Some-Header: Host:yandex.ru\r\n"));
+        UNIT_ASSERT(msg.Data.Contains("Host: yandex.ru\r\n"));
+        UNIT_ASSERT(!msg.Data.Contains("Host: localhost"));
     }
 
     Y_UNIT_TEST(TMakeFullRequestWithContentLength1) {
@@ -246,6 +285,24 @@ Y_UNIT_TEST_SUITE(THttpCommon) {
                             msg.Data);
     }
 
+    Y_UNIT_TEST(TMakeFullRequestBrokenHeaderSplitter) {
+        /// Test for preserving behaviour.
+        NNeh::TMessage msg = NNeh::TMessage::FromString("http://localhost:3380/ntables");
+        const TString headers =
+            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\n"
+            "Accept-Encoding: identity\n\r\n";
+        const TVector<TString> urlParts = {TString("text=query"), TString("lr=213")};
+
+        UNIT_ASSERT(NNeh::NHttp::MakeFullRequest(msg, urlParts, headers, "", ""));
+        UNIT_ASSERT_EQUAL_C(msg.Data,
+                            "GET /ntables?text=query&lr=213 HTTP/1.1\r\n"
+                            "Host: localhost:3380\r\n"
+                            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
+                            "Accept-Encoding: identity\r\n"
+                            "\r\n",
+                            msg.Data);
+    }
+
     Y_UNIT_TEST(TMakeFullRequestPut1) {
         /// Test for preserving behaviour.
         using NNeh::NHttp::ERequestType;
@@ -313,5 +370,26 @@ Y_UNIT_TEST_SUITE(THttpCommon) {
         TStringStream ss;
         ss << NNeh::NHttp::ERequestType::Post;
         UNIT_ASSERT_VALUES_EQUAL(ss.Str(), "POST");
+    }
+
+    Y_UNIT_TEST(TIsHttpScheme) {
+        UNIT_ASSERT(NNeh::NHttp::IsHttpScheme("http"));
+        UNIT_ASSERT(NNeh::NHttp::IsHttpScheme("post"));
+        UNIT_ASSERT(!NNeh::NHttp::IsHttpScheme("inproc"));
+    }
+
+    Y_UNIT_TEST(TSplitHeaders) {
+        TString headers = "Host: yandex.ru\r\nContent-Length: 18\r\nX-Header: v:5\n\r\nX-Header2: yyy\nX-Header3: zzz";
+        TVector<TString> expected = {"Host: yandex.ru", "Content-Length: 18", "X-Header: v:5", "X-Header2: yyy", "X-Header3: zzz"};
+
+        size_t i = 0;
+        NNeh::NHttp::THeaderSplitter splitter{headers};
+
+        TStringBuf header;
+        while (splitter.Next(header)) {
+            UNIT_ASSERT_VALUES_EQUAL(header, expected[i++]);
+        };
+
+        UNIT_ASSERT_VALUES_EQUAL(i, expected.size());
     }
 }

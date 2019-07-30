@@ -9,7 +9,7 @@ LICENSE(
 ADDINCL(
     contrib/python/numpy/numpy/core/include
     contrib/python/numpy/numpy/core/include/numpy
-    contrib/python/numpy/numpy/core/src/private
+    contrib/python/numpy/numpy/core/src/common
 )
 
 CFLAGS(
@@ -34,6 +34,6 @@ PY_SRCS(
     info.py
 )
 
-PY_REGISTER(numpy.fft.fftpack_lite=fftpack_lite)
+PY_REGISTER(numpy.fft.fftpack_lite)
 
 END()

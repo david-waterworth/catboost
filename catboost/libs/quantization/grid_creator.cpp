@@ -10,10 +10,10 @@ namespace NCB {
         public:
             TVector<float> BuildBorders(TConstArrayRef<float> sortedFeature, ui32 borderCount) const override {
                 TVector<float> copy = CheckedCopyWithoutNans(sortedFeature, ENanMode::Forbidden);
-                auto bordersSet = Binarizer->BestSplit(copy, borderCount, true);
-                TVector<float> borders(bordersSet.begin(), bordersSet.end());
-                Sort(borders.begin(), borders.end());
-                return borders;
+                auto quantization
+                    = Binarizer->BestSplit(NSplitSelection::TFeatureValues(std::move(copy), true), borderCount);
+
+                return std::move(quantization.Borders);
             }
 
         private:
@@ -64,6 +64,8 @@ namespace NCB {
                 return MakeHolder<TCpuGridBuilder<EBorderSelectionType::UniformAndQuantiles>>();
             case EBorderSelectionType::GreedyLogSum:
                 return MakeHolder<TCpuGridBuilder<EBorderSelectionType::GreedyLogSum>>();
+            case EBorderSelectionType::GreedyMinEntropy:
+                return MakeHolder<TCpuGridBuilder<EBorderSelectionType::GreedyMinEntropy>>();
             case EBorderSelectionType::MinEntropy:
                 return MakeHolder<TCpuGridBuilder<EBorderSelectionType::MinEntropy>>();
             case EBorderSelectionType::MaxLogSum:

@@ -4,17 +4,24 @@
 #include "error_functions.h"
 #include "fold.h"
 #include "greedy_tensor_search.h"
+#include "learn_context.h"
 #include "online_ctr.h"
 #include "tensor_search_helpers.h"
 
 #include <catboost/libs/data_new/data_provider.h>
-#include <catboost/libs/distributed/worker.h>
 #include <catboost/libs/distributed/master.h>
+#include <catboost/libs/distributed/worker.h>
 #include <catboost/libs/helpers/interrupt.h>
 #include <catboost/libs/helpers/query_info_helper.h>
 #include <catboost/libs/logging/profile_info.h>
 
-TErrorTracker BuildErrorTracker(EMetricBestValue bestValueType, double bestPossibleValue, bool hasTest, const TLearnContext& ctx) {
+
+TErrorTracker BuildErrorTracker(
+    EMetricBestValue bestValueType,
+    double bestPossibleValue,
+    bool hasTest,
+    const TLearnContext& ctx
+) {
     const auto& odOptions = ctx.Params.BoostingOptions->OverfittingDetector;
     return CreateErrorTracker(odOptions, bestPossibleValue, bestValueType, hasTest);
 }
@@ -40,35 +47,122 @@ static void UpdateLearningFold(
     );
 
     if (error.GetIsExpApprox()) {
-        UpdateBodyTailApprox</*StoreExpApprox*/ true>(approxDelta, ctx->Params.BoostingOptions->LearningRate, ctx->LocalExecutor, fold);
+        UpdateBodyTailApprox</*StoreExpApprox*/true>(
+            approxDelta,
+            ctx->Params.BoostingOptions->LearningRate,
+            ctx->LocalExecutor,
+            fold
+        );
     } else {
-        UpdateBodyTailApprox</*StoreExpApprox*/ false>(approxDelta, ctx->Params.BoostingOptions->LearningRate, ctx->LocalExecutor, fold);
+        UpdateBodyTailApprox</*StoreExpApprox*/false>(
+            approxDelta,
+            ctx->Params.BoostingOptions->LearningRate,
+            ctx->LocalExecutor,
+            fold
+        );
     }
+}
+
+static void ScaleAllApproxes(
+    const double approxMultiplier,
+    const bool storeExpApprox,
+    TLearnProgress* learnProgress,
+    NPar::TLocalExecutor* localExecutor
+) {
+    TVector<TVector<TVector<double>>*> allApproxes;
+    for (auto& fold : learnProgress->Folds) {
+        for (auto &bodyTail : fold.BodyTailArr) {
+            allApproxes.push_back(&bodyTail.Approx);
+        }
+    }
+    allApproxes.push_back(&learnProgress->AveragingFold.BodyTailArr[0].Approx);
+    for (auto& testApprox : learnProgress->TestApprox) {
+        allApproxes.push_back(&testApprox);
+    }
+
+    NPar::ParallelFor(
+        *localExecutor,
+        0,
+        allApproxes.size(),
+        [approxMultiplier, storeExpApprox, localExecutor, &allApproxes](int index) {
+            if (storeExpApprox) {
+                UpdateApprox(
+                    [approxMultiplier](TConstArrayRef<double> /* delta */, TArrayRef<double> approx, size_t idx) {
+                        approx[idx] = ApplyLearningRate<true>(approx[idx], approxMultiplier);
+                    },
+                    *allApproxes[index], // stub deltas
+                    allApproxes[index],
+                    localExecutor
+                );
+            } else {
+                UpdateApprox(
+                    [approxMultiplier](TConstArrayRef<double> /* delta */, TArrayRef<double> approx, size_t idx) {
+                        approx[idx] = ApplyLearningRate<false>(approx[idx], approxMultiplier);
+                    },
+                    *allApproxes[index], // stub deltas
+                    allApproxes[index],
+                    localExecutor
+                );
+            }
+        }
+    );
 }
 
 void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnContext* ctx) {
     const auto error = BuildError(ctx->Params, ctx->ObjectiveDescriptor);
-    ctx->LearnProgress.HessianType = error->GetHessianType();
+    ctx->LearnProgress->HessianType = error->GetHessianType();
     CheckDerivativeOrderForTrain(
         error->GetMaxSupportedDerivativeOrder(),
         ctx->Params.ObliviousTreeOptions->LeavesEstimationMethod
     );
     TProfileInfo& profile = ctx->Profile;
 
-    const int foldCount = ctx->LearnProgress.Folds.ysize();
-    const int currentIteration = ctx->LearnProgress.TreeStruct.ysize();
-    const double modelLength = currentIteration * ctx->Params.BoostingOptions->LearningRate;
+    const size_t iterationIndex = ctx->LearnProgress->TreeStruct.size();
+    const int foldCount = ctx->LearnProgress->Folds.ysize();
+    const double modelLength
+        = double(iterationIndex) * ctx->Params.BoostingOptions->LearningRate;
 
     CheckInterrupted(); // check after long-lasting operation
 
+    const double modelShrinkRate = ctx->Params.BoostingOptions->ModelShrinkRate.Get();
+    if (modelShrinkRate > 0) {
+        if (iterationIndex > 0) {
+            const double modelShrinkage = 1 - modelShrinkRate / static_cast<double>(iterationIndex);
+            ScaleAllApproxes(
+                modelShrinkage,
+                error->GetIsExpApprox(),
+                ctx->LearnProgress.Get(),
+                ctx->LocalExecutor
+            );
+            ctx->LearnProgress->ModelShrinkHistory.push_back(modelShrinkage);
+        } else {
+            ctx->LearnProgress->ModelShrinkHistory.push_back(1.0);
+        }
+    }
+
     TSplitTree bestSplitTree;
     {
-        TFold* takenFold = &ctx->LearnProgress.Folds[ctx->Rand.GenRand() % foldCount];
-        const TVector<ui64> randomSeeds = GenRandUI64Vector(takenFold->BodyTailArr.ysize(), ctx->Rand.GenRand());
+        TFold* takenFold = &ctx->LearnProgress->Folds[ctx->LearnProgress->Rand.GenRand() % foldCount];
+        const TVector<ui64> randomSeeds = GenRandUI64Vector(
+            takenFold->BodyTailArr.ysize(),
+            ctx->LearnProgress->Rand.GenRand()
+        );
         if (ctx->Params.SystemOptions->IsSingleHost()) {
-            ctx->LocalExecutor->ExecRangeWithThrow([&](int bodyTailId) {
-                CalcWeightedDerivatives(*error, bodyTailId, ctx->Params, randomSeeds[bodyTailId], takenFold, ctx->LocalExecutor);
-            }, 0, takenFold->BodyTailArr.ysize(), NPar::TLocalExecutor::WAIT_COMPLETE);
+            ctx->LocalExecutor->ExecRangeWithThrow(
+                [&](int bodyTailId) {
+                    CalcWeightedDerivatives(
+                        *error,
+                        bodyTailId,
+                        ctx->Params,
+                        randomSeeds[bodyTailId],
+                        takenFold,
+                        ctx->LocalExecutor
+                    );
+                },
+                0,
+                takenFold->BodyTailArr.ysize(),
+                NPar::TLocalExecutor::WAIT_COMPLETE
+            );
         } else {
             Y_ASSERT(takenFold->BodyTailArr.ysize() == 1);
             MapSetDerivatives(ctx);
@@ -88,20 +182,22 @@ void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnCont
     {
         TVector<TFold*> trainFolds;
         for (int foldId = 0; foldId < foldCount; ++foldId) {
-            trainFolds.push_back(&ctx->LearnProgress.Folds[foldId]);
+            trainFolds.push_back(&ctx->LearnProgress->Folds[foldId]);
         }
 
         TrimOnlineCTRcache(trainFolds);
-        TrimOnlineCTRcache({ &ctx->LearnProgress.AveragingFold });
+        TrimOnlineCTRcache({ &ctx->LearnProgress->AveragingFold });
         {
             TVector<TFold*> allFolds = trainFolds;
-            allFolds.push_back(&ctx->LearnProgress.AveragingFold);
+            allFolds.push_back(&ctx->LearnProgress->AveragingFold);
 
             struct TLocalJobData {
                 const NCB::TTrainingForCPUDataProviders* data;
                 TProjection Projection;
                 TFold* Fold;
                 TOnlineCTR* Ctr;
+
+            public:
                 void DoTask(TLearnContext* ctx) {
                     ComputeOnlineCTRs(*data, *Fold, Projection, ctx, Ctr);
                 }
@@ -120,16 +216,22 @@ void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnCont
                 }
                 for (auto* foldPtr : allFolds) {
                     if (!foldPtr->GetCtrs(proj).contains(proj) || foldPtr->GetCtr(proj).Feature.empty()) {
-                        parallelJobsData.emplace_back(TLocalJobData{ &data, proj, foldPtr, &foldPtr->GetCtrRef(proj) });
+                        parallelJobsData.emplace_back(
+                            TLocalJobData{ &data, proj, foldPtr, &foldPtr->GetCtrRef(proj) }
+                        );
                     }
                 }
                 seenProjections.insert(proj);
             }
 
-            ctx->LocalExecutor->ExecRange([&](int taskId){
-                parallelJobsData[taskId].DoTask(ctx);
-            }, 0, parallelJobsData.size(), NPar::TLocalExecutor::WAIT_COMPLETE);
-
+            ctx->LocalExecutor->ExecRange(
+                [&](int taskId){
+                    parallelJobsData[taskId].DoTask(ctx);
+                },
+                0,
+                parallelJobsData.size(),
+                NPar::TLocalExecutor::WAIT_COMPLETE
+            );
         }
         profile.AddOperation("ComputeOnlineCTRs for tree struct (train folds and test fold)");
         CheckInterrupted(); // check after long-lasting operation
@@ -138,10 +240,22 @@ void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnCont
         TVector<double> sumLeafWeights; // [leafId]
 
         if (ctx->Params.SystemOptions->IsSingleHost()) {
-            const TVector<ui64> randomSeeds = GenRandUI64Vector(foldCount, ctx->Rand.GenRand());
-            ctx->LocalExecutor->ExecRangeWithThrow([&](int foldId) {
-                UpdateLearningFold(data, *error, bestSplitTree, randomSeeds[foldId], trainFolds[foldId], ctx);
-            }, 0, foldCount, NPar::TLocalExecutor::WAIT_COMPLETE);
+            const TVector<ui64> randomSeeds = GenRandUI64Vector(foldCount, ctx->LearnProgress->Rand.GenRand());
+            ctx->LocalExecutor->ExecRangeWithThrow(
+                [&](int foldId) {
+                    UpdateLearningFold(
+                        data,
+                        *error,
+                        bestSplitTree,
+                        randomSeeds[foldId],
+                        trainFolds[foldId],
+                        ctx
+                    );
+                },
+                0,
+                foldCount,
+                NPar::TLocalExecutor::WAIT_COMPLETE
+            );
 
             profile.AddOperation("CalcApprox tree struct and update tree structure approx");
             CheckInterrupted(); // check after long-lasting operation
@@ -150,7 +264,7 @@ void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnCont
             CalcLeafValues(
                 data,
                 *error,
-                ctx->LearnProgress.AveragingFold,
+                ctx->LearnProgress->AveragingFold,
                 bestSplitTree,
                 ctx,
                 &treeValues,
@@ -160,10 +274,15 @@ void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnCont
             ctx->Profile.AddOperation("CalcApprox result leaves");
             CheckInterrupted(); // check after long-lasting operation
 
-            TConstArrayRef<ui32> learnPermutationRef = ctx->LearnProgress.AveragingFold.GetLearnPermutationArray();
+            TConstArrayRef<ui32> learnPermutationRef = ctx->LearnProgress->AveragingFold.GetLearnPermutationArray();
 
             const size_t leafCount = treeValues[0].size();
-            sumLeafWeights = SumLeafWeights(leafCount, indices, learnPermutationRef, GetWeights(*data.Learn->TargetData));
+            sumLeafWeights = SumLeafWeights(
+                leafCount,
+                indices,
+                learnPermutationRef,
+                GetWeights(*data.Learn->TargetData)
+            );
             NormalizeLeafValues(
                 UsesPairsForCalculation(ctx->Params.LossFunctionDescription->GetLossFunction()),
                 ctx->Params.BoostingOptions->LearningRate,
@@ -171,19 +290,27 @@ void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnCont
                 &treeValues
             );
 
-            UpdateAvrgApprox(error->GetIsExpApprox(), data.Learn->GetObjectCount(), indices, treeValues, data.Test, &ctx->LearnProgress, ctx->LocalExecutor);
+            UpdateAvrgApprox(
+                error->GetIsExpApprox(),
+                data.Learn->GetObjectCount(),
+                indices,
+                treeValues,
+                data.Test,
+                ctx->LearnProgress.Get(),
+                ctx->LocalExecutor
+            );
         } else {
-            if (ctx->LearnProgress.ApproxDimension == 1) {
+            if (ctx->LearnProgress->ApproxDimension == 1) {
                 MapSetApproxesSimple(*error, bestSplitTree, data.Test, &treeValues, &sumLeafWeights, ctx);
             } else {
                 MapSetApproxesMulti(*error, bestSplitTree, data.Test, &treeValues, &sumLeafWeights, ctx);
             }
         }
 
-        ctx->LearnProgress.TreeStats.emplace_back();
-        ctx->LearnProgress.TreeStats.back().LeafWeightsSum = sumLeafWeights;
-        ctx->LearnProgress.LeafValues.push_back(treeValues);
-        ctx->LearnProgress.TreeStruct.push_back(bestSplitTree);
+        ctx->LearnProgress->TreeStats.emplace_back();
+        ctx->LearnProgress->TreeStats.back().LeafWeightsSum = std::move(sumLeafWeights);
+        ctx->LearnProgress->LeafValues.push_back(std::move(treeValues));
+        ctx->LearnProgress->TreeStruct.push_back(std::move(bestSplitTree));
 
         profile.AddOperation("Update final approxes");
         CheckInterrupted(); // check after long-lasting operation

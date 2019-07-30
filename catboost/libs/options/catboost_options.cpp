@@ -7,6 +7,9 @@
 #include <util/generic/set.h>
 #include <util/string/cast.h>
 #include <util/system/info.h>
+#include <util/string/builder.h>
+#include <util/string/vector.h>
+#include <util/generic/hash_set.h>
 
 template <>
 void Out<NCatboostOptions::TCatBoostOptions>(IOutputStream& out, const NCatboostOptions::TCatBoostOptions& options) {
@@ -78,6 +81,13 @@ void NCatboostOptions::TCatBoostOptions::SetLeavesEstimationDefault() {
             defaultEstimationMethod = ELeavesEstimation::Gradient;
             break;
         }
+        case ELossFunction::Expectile: {
+            CB_ENSURE(lossFunctionConfig.GetLossParams().contains("alpha"), "Param alpha is mandatory for expectile loss");
+            defaultNewtonIterations = 5;
+            defaultGradientIterations = 10;
+            defaultEstimationMethod = ELeavesEstimation::Newton;
+            break;
+        }
         case ELossFunction::PairLogit: {
             defaultEstimationMethod = ELeavesEstimation::Newton;
             defaultNewtonIterations = 10;
@@ -130,6 +140,12 @@ void NCatboostOptions::TCatBoostOptions::SetLeavesEstimationDefault() {
             defaultNewtonIterations = 10;
             treeConfig.PairwiseNonDiagReg.SetDefault(0);
             defaultL2Reg = 1;
+            break;
+        }
+        case ELossFunction::Huber: {
+            defaultEstimationMethod = ELeavesEstimation::Newton;
+            defaultNewtonIterations = 1;
+            defaultGradientIterations = 1;
             break;
         }
         case ELossFunction::StochasticFilter: {
@@ -211,7 +227,7 @@ void NCatboostOptions::TCatBoostOptions::Load(const NJson::TJsonValue& options) 
                 &SystemOptions, &BoostingOptions, &ModelBasedEvalOptions,
                 &ObliviousTreeOptions,
                 &DataProcessingOptions, &LossFunctionDescription,
-                &RandomSeed, &CatFeatureParams,
+                &RandomSeed, &CatFeatureParams, &TextFeatureOptions,
                 &FlatParams, &Metadata, &LoggingLevel,
                 &IsProfile, &MetricOptions);
     SetNotSpecifiedOptionsToDefaults();
@@ -222,7 +238,8 @@ void NCatboostOptions::TCatBoostOptions::Load(const NJson::TJsonValue& options) 
 void NCatboostOptions::TCatBoostOptions::Save(NJson::TJsonValue* options) const {
     SaveFields(options, TaskType, SystemOptions, BoostingOptions, ModelBasedEvalOptions, ObliviousTreeOptions,
                DataProcessingOptions, LossFunctionDescription,
-               RandomSeed, CatFeatureParams, FlatParams, Metadata, LoggingLevel, IsProfile, MetricOptions);
+               RandomSeed, CatFeatureParams, TextFeatureOptions, FlatParams,
+               Metadata, LoggingLevel, IsProfile, MetricOptions);
 }
 
 NCatboostOptions::TCtrDescription
@@ -373,6 +390,57 @@ void NCatboostOptions::TCatBoostOptions::ValidateCtr(const TCtrDescription& ctr,
     }
 }
 
+inline double CalculateExpectedSizeModel(const ui32 leafCount, const ui32 iterations) {
+    return static_cast<double>(leafCount) * sizeof(double) * iterations * 2;
+}
+
+inline TString GetMessageDecreaseDepth(const ui32 leafCount, const ui32 border) {
+    return "Each tree in the model is requested to have " + ToString(leafCount) +
+           " leaves. Model will weight more than " + ToString(border) + " Gb. Try decreasing depth.";
+}
+
+inline TString GetMessageDecreaseNumberIter(const ui32 treeCount, const ui32 border) {
+    return "Model with " + ToString(treeCount) + " trees will weight more then " + ToString(border) +
+           " Gb. Try decreasing number of iterations";
+}
+
+static void ValidateModelSize(const NCatboostOptions::TObliviousTreeLearnerOptions& treeConfig,
+                              const NCatboostOptions::TOverfittingDetectorOptions& overfittingDetectorConfig,
+                              const ETaskType taskType) {
+    ui32 leafCount;
+    if (taskType == ETaskType::GPU) {
+        const bool isSymmetricTreeOrDepthwise = (treeConfig.GrowPolicy.Get() == EGrowPolicy::SymmetricTree ||
+                                            treeConfig.GrowPolicy.Get() == EGrowPolicy::Depthwise);
+        if (isSymmetricTreeOrDepthwise) {
+            leafCount = 1 << treeConfig.MaxDepth.Get();
+        } else {
+            leafCount = treeConfig.MaxLeaves.Get();
+        }
+    } else {
+        leafCount = 1 << treeConfig.MaxDepth.Get();
+    }
+
+    constexpr ui32 OneGb = (1 << 30);
+    constexpr ui32 TwoGb = (1 << 31);
+    const ui32 treeCount = treeConfig.LeavesEstimationIterations.Get();
+    const double totalSizeModel = CalculateExpectedSizeModel(leafCount, treeCount);
+    const bool hasOverfittingDetector = (overfittingDetectorConfig.OverfittingDetectorType.Get() != EOverfittingDetectorType::None);
+    const bool isModelSizeExceedOneGb = (totalSizeModel > OneGb);
+    const bool isModelSizeLowerTwoGb = (hasOverfittingDetector || totalSizeModel < TwoGb);
+
+    if (leafCount > (1 << 12)) {
+        CB_ENSURE(isModelSizeLowerTwoGb, GetMessageDecreaseDepth(leafCount, 2));
+        if (isModelSizeExceedOneGb) {
+            CATBOOST_WARNING_LOG << GetMessageDecreaseDepth(leafCount, 1);
+        }
+    } else {
+        CB_ENSURE(isModelSizeLowerTwoGb, GetMessageDecreaseNumberIter(treeCount, 2));
+        if (isModelSizeExceedOneGb) {
+            CATBOOST_WARNING_LOG << GetMessageDecreaseNumberIter(treeCount, 1);
+        }
+    }
+}
+
 void NCatboostOptions::TCatBoostOptions::Validate() const {
     ELossFunction lossFunction = LossFunctionDescription->GetLossFunction();
     {
@@ -448,6 +516,47 @@ void NCatboostOptions::TCatBoostOptions::Validate() const {
         CB_ENSURE(keyValue.second.IsString(), "only string to string metadata dictionary supported");
     }
     CB_ENSURE(!Metadata.Get().Has("params"), "\"params\" key in metadata prohibited");
+
+    // Delete it when MLTOOLS-3572 is implemented.
+    if (ShouldBinarizeLabel(LossFunctionDescription->LossFunction.Get())) {
+        const TString message = "Metric parameter 'border' isn't supported when target is binarized.";
+        CB_ENSURE(!LossFunctionDescription->LossParams->contains("border"), message);
+        CB_ENSURE(!MetricOptions->EvalMetric->LossParams->contains("border"), message);
+        CB_ENSURE(!MetricOptions->ObjectiveMetric->LossParams->contains("border"), message);
+        for (const auto& metric : MetricOptions->CustomMetrics.Get()) {
+            CB_ENSURE(!metric.LossParams->contains("border"), message);
+        }
+    }
+
+    // Delete it when MLTOOLS-3612 is implemented.
+    CB_ENSURE(!LossFunctionDescription->LossParams->contains("use_weights"),
+        "Metric parameter 'use_weights' isn't supported for objective function. " <<
+        "If weights are present they will necessarily be used in optimization. " <<
+        "It cannot be disabled.");
+
+    if (GetTaskType() == ETaskType::CPU && !ObliviousTreeOptions->MonotoneConstraints.Get().empty()) {
+        // validate monotone constraints
+        const auto& monotoneConstraints = ObliviousTreeOptions->MonotoneConstraints.Get();
+        CB_ENSURE(!IsPairwiseScoring(lossFunction),
+            "Monotone constraints is unsupported for pairwise loss functions."
+        );
+        CB_ENSURE(!IsMultiClassOnlyMetric(lossFunction),
+            "Monotone constraints is unsupported for multiclass."
+        );
+        CB_ENSURE(!BoostingOptions->ApproxOnFullHistory.Get(),
+            "Can't combine approx_on_full_history with monotone constraints."
+        );
+        CB_ENSURE(
+            SystemOptions->IsSingleHost(), "Monotone constraints is unsupported for distributed learning."
+        );
+        const THashSet<int> validMonotoneConstraintValues = {-1, 0, 1};
+        CB_ENSURE(
+            AllOf(monotoneConstraints, [&] (int val) { return validMonotoneConstraintValues.contains(val); }),
+            TStringBuilder() << "Monotone constraints should be values in {-1, 0, 1}. Got:\n" <<
+            "(" << JoinVectorIntoString(monotoneConstraints, ",") << ")"
+        );
+    }
+    ValidateModelSize(ObliviousTreeOptions.Get(), BoostingOptions->OverfittingDetector.Get(), GetTaskType());
 }
 
 void NCatboostOptions::TCatBoostOptions::SetNotSpecifiedOptionsToDefaults() {
@@ -484,6 +593,36 @@ void NCatboostOptions::TCatBoostOptions::SetNotSpecifiedOptionsToDefaults() {
             break;
         }
     }
+
+    switch (LossFunctionDescription->GetLossFunction()) {
+        case ELossFunction::YetiRank:
+        case ELossFunction::YetiRankPairwise: {
+            NCatboostOptions::TLossDescription lossDescription;
+            lossDescription.Load(LossDescriptionToJson("PFound"));
+            MetricOptions->ObjectiveMetric.Set(lossDescription);
+            break;
+        }
+        case ELossFunction::PairLogit:
+        case ELossFunction::PairLogitPairwise: {
+            NCatboostOptions::TLossDescription lossDescription;
+            lossDescription.LossParams.Set(LossFunctionDescription->GetLossParams());
+            lossDescription.LossFunction.Set(ELossFunction::PairLogit);
+            MetricOptions->ObjectiveMetric.Set(lossDescription);
+            break;
+        }
+        case ELossFunction::StochasticFilter: {
+            NCatboostOptions::TLossDescription lossDescription;
+            lossDescription.LossParams.Set(LossFunctionDescription->GetLossParams());
+            lossDescription.LossFunction.Set(ELossFunction::FilteredDCG);
+            MetricOptions->ObjectiveMetric.Set(lossDescription);
+            break;
+        }
+        default: {
+            MetricOptions->ObjectiveMetric.Set(LossFunctionDescription.Get());
+            break;
+        }
+    }
+
     if (TaskType == ETaskType::GPU) {
         if (IsGpuPlainDocParallelOnlyMode(LossFunctionDescription->GetLossFunction()) ||
             ObliviousTreeOptions->GrowPolicy != EGrowPolicy::SymmetricTree) {
@@ -535,6 +674,10 @@ void NCatboostOptions::TCatBoostOptions::SetNotSpecifiedOptionsToDefaults() {
 
     if (DataProcessingOptions->HasTimeFlag) {
         BoostingOptions->PermutationCount = 1;
+    }
+
+    if (CatFeatureParams->MaxTensorComplexity.NotSet() && IsSmallIterationCount(BoostingOptions->IterationCount)) {
+        CatFeatureParams->MaxTensorComplexity = 1;
     }
 }
 
@@ -594,12 +737,27 @@ NCatboostOptions::TCatBoostOptions NCatboostOptions::LoadOptions(const NJson::TJ
     return options;
 }
 
+static bool IsFullBaseline(const NJson::TJsonValue& source) {
+    NCatboostOptions::TOption<bool> isFullBaseline(
+        "use_evaluated_features_in_baseline_model",
+        false
+    );
+    NCatboostOptions::TJsonFieldHelper<decltype(isFullBaseline)>::Read(
+        source["model_based_eval_options"],
+        &isFullBaseline
+    );
+    return isFullBaseline.Get();
+}
+
 static TSet<ui32> GetMaybeIgnoredFeatures(const NJson::TJsonValue& params) {
     const auto ignoredFeatures = GetOptionIgnoredFeatures(params);
     const auto featuresToEvaluate = GetOptionFeaturesToEvaluate(params);
     TSet<ui32> result;
     result.insert(ignoredFeatures.begin(), ignoredFeatures.end());
-    result.insert(featuresToEvaluate.begin(), featuresToEvaluate.end());
+    const bool isFullBaseline = IsFullBaseline(params);
+    if (!isFullBaseline) {
+        result.insert(featuresToEvaluate.begin(), featuresToEvaluate.end());
+    }
     return result;
 }
 
@@ -650,6 +808,7 @@ NCatboostOptions::TCatBoostOptions::TCatBoostOptions(ETaskType taskType)
     , DataProcessingOptions("data_processing_options", TDataProcessingOptions(taskType))
     , LossFunctionDescription("loss_function", TLossDescription())
     , CatFeatureParams("cat_feature_params", TCatFeatureParams(taskType))
+    , TextFeatureOptions("text_feature_options", TTextFeatureOptions())
     , FlatParams("flat_params", NJson::TJsonValue(NJson::JSON_MAP))
     , Metadata("metadata", NJson::TJsonValue(NJson::JSON_MAP))
     , RandomSeed("random_seed", 0)

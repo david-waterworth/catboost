@@ -9,7 +9,7 @@ import __res as __resource
 
 env_entry_point = b'Y_PYTHON_ENTRY_POINT'
 env_source_root = b'Y_PYTHON_SOURCE_ROOT'
-executable = sys.executable
+executable = sys.executable or 'Y_PYTHON'
 path_sep = utf_8_encode(path_sep)[0]
 sys.modules['run_import_hook'] = __resource
 
@@ -50,54 +50,6 @@ def iter_keys(prefix):
             yield key, key[l:]
 
 
-def resfs_src(key, resfs_file=False):
-    """
-    Return the root-relative file path of a resource key.
-    """
-    if resfs_file:
-        key = b'resfs/file/' + key
-    return __resource.find(b'resfs/src/' + key)
-
-
-def _relpath(key):
-    """
-    Return the root relative path of a virtual path.
-    """
-    return resfs_src(key, resfs_file=True)
-
-
-def resfs_resolve(path):
-    """
-    Return the absolute path of a root relative path if it exists.
-    """
-    if Y_PYTHON_SOURCE_ROOT:
-        abspath = path_sep.join((Y_PYTHON_SOURCE_ROOT, path))
-        if _path_isfile(abspath):
-            return abspath
-
-
-def resfs_read(path, builtin=None):
-    """
-    Return the bytes of the resouce file at the virtual path. (Or None unless it exists.)
-    If builtin is True, do not look for it on the filesystem.
-    If builtin is False, do not look in the builtin resources.
-    """
-    if builtin is not True:
-        abspath = resfs_resolve(_relpath(path))
-        if abspath:
-            return file_bytes(abspath)
-
-    if builtin is not False:
-        return __resource.find(b'resfs/file/' + path)
-
-
-def mod_path(mod):
-    """
-    Return the virtual path to the source code of the module with the given name.
-    """
-    return py_prefix + utf_8_encode(mod.replace('.', '/') + '.py')[0]
-
-
 def iter_py_modules(with_keys=False):
     for key, path in iter_keys(b'resfs/file/' + py_prefix):
         if path.endswith(b'.py'):  # It may also end with '.pyc'.
@@ -115,11 +67,54 @@ def iter_prefixes(s):
         i = s.find('.', i + 1)
 
 
+def resfs_resolve(path):
+    """
+    Return the absolute path of a root-relative path if it exists.
+    """
+    if Y_PYTHON_SOURCE_ROOT:
+        if not path.startswith(Y_PYTHON_SOURCE_ROOT):
+            path = path_sep.join((Y_PYTHON_SOURCE_ROOT, path))
+        if _path_isfile(path):
+            return path
+
+
+def resfs_src(key, resfs_file=False):
+    """
+    Return the root-relative file path of a resource key.
+    """
+    if resfs_file:
+        key = b'resfs/file/' + key
+    return __resource.find(b'resfs/src/' + key)
+
+
+def resfs_read(path, builtin=None):
+    """
+    Return the bytes of the resource file at path, or None.
+    If builtin is True, do not look for it on the filesystem.
+    If builtin is False, do not look in the builtin resources.
+    """
+    if builtin is not True:
+        abspath = resfs_resolve(resfs_src(path, resfs_file=True))
+        if abspath:
+            return file_bytes(abspath)
+
+    if builtin is not False:
+        return __resource.find(b'resfs/file/' + path)
+
+
 def resfs_files():
     """
     List builtin resource file paths.
     """
     return [path for _, path in iter_keys(b'resfs/file/')]
+
+
+def mod_path(mod):
+    """
+    Return the resfs path to the source code of the module with the given name.
+    """
+    return py_prefix + utf_8_encode(mod.replace('.', '/') + '.py')[0]
+
 
 class ResourceImporter(object):
 
@@ -130,6 +125,7 @@ class ResourceImporter(object):
         self.memory = set(iter_py_modules())  # Set of importable module names.
         self.source_map = {}                  # Map from file names to module names.
         self._source_name = {}                # Map from original to altered module names.
+        self._package_prefix = ''
 
         for p in list(self.memory) + list(sys.builtin_module_names):
             for pp in iter_prefixes(p):
@@ -137,7 +133,13 @@ class ResourceImporter(object):
                 if k not in self.memory:
                     self.memory.add(k)
 
-    def find_spec(self, fullname, path, target=None):
+    def for_package(self, name):
+        import copy
+        importer = copy.copy(self)
+        importer._package_prefix = name + '.'
+        return importer
+
+    def find_spec(self, fullname, path=None, target=None):
         try:
             is_package = self.is_package(fullname)
         except ImportError:
@@ -154,15 +156,22 @@ class ResourceImporter(object):
 
     def exec_module(self, module):
         code = self.get_code(module.__name__)
+        module.__file__ = code.co_filename
+        if self.is_package(module.__name__):
+            module.__path__= [executable + '/' + module.__name__]
+        # exec(code, module.__dict__)
         _call_with_frames_removed(exec, code, module.__dict__)
 
     # PEP-302 extension 1 of 3: data loader.
     def get_data(self, path):
         if isinstance(path, str):
             path = utf_8_encode(path)[0]
-        data = resfs_read(path)
+        abspath = resfs_resolve(path)
+        if abspath:
+            return file_bytes(abspath)
+        data = resfs_read(path, builtin=True)
         if data is None:
-            raise IOError
+            raise IOError(path)  # Y_PYTHON_ENTRY_POINT=:resource_files
         return data
 
     # PEP-302 extension 2 of 3: get __file__ without importing.
@@ -170,7 +179,7 @@ class ResourceImporter(object):
         modname = fullname
         if self.is_package(fullname):
             fullname += '.__init__'
-        relpath = _relpath(mod_path(fullname))
+        relpath = resfs_src(mod_path(fullname), resfs_file=True)
         if isinstance(relpath, bytes):
             relpath = utf_8_decode(relpath)[0]
         return relpath or modname
@@ -185,7 +194,7 @@ class ResourceImporter(object):
 
         relpath = self.get_filename(fullname)
         if relpath:
-            abspath = resfs_resolve(relpath)
+            abspath = resfs_resolve(utf_8_encode(relpath)[0])
             if abspath:
                 return utf_8_decode(file_bytes(abspath))[0]
         data = resfs_read(mod_path(fullname))
@@ -197,12 +206,12 @@ class ResourceImporter(object):
             fullname += '.__init__'
 
         path = mod_path(fullname)
-        relpath = _relpath(path)
+        relpath = resfs_src(path, resfs_file=True)
         if relpath:
             abspath = resfs_resolve(relpath)
             if abspath:
-                data = resfs_read(path, builtin=False)
-                return compile(data, abspath, 'exec', dont_inherit=True)
+                data = file_bytes(abspath)
+                return compile(data, utf_8_decode(abspath)[0], 'exec', dont_inherit=True)
 
         yapyc_path = path + b'.yapyc3'
         yapyc_data = resfs_read(yapyc_path, builtin=True)
@@ -211,7 +220,7 @@ class ResourceImporter(object):
         else:
             py_data = resfs_read(path, builtin=True)
             if py_data:
-                return compile(py_data, relpath, 'exec', dont_inherit=True)
+                return compile(py_data, utf_8_decode(relpath)[0], 'exec', dont_inherit=True)
             else:
                 # This covers packages with no __init__.py in resources.
                 return compile('', modname, 'exec', dont_inherit=True)
@@ -235,7 +244,23 @@ class ResourceImporter(object):
                 path = self.get_filename(mod)
                 self.source_map[path] = key
 
-        return self.source_map.get(filename, '')
+        if filename in self.source_map:
+            return self.source_map[filename]
+
+        filename = utf_8_encode(filename)[0]
+        if resfs_read(filename, builtin=True) is not None:
+            return b'resfs/file/' + filename
+
+        return b''
+
+    # Extension for pkgutil.iter_modules.
+    def iter_modules(self, prefix=''):
+        import re
+        rx = re.compile(re.escape(self._package_prefix) + r'([^.]+)(\.__init__)?$')
+        for p in self.memory:
+            m = rx.match(p)
+            if m:
+                yield prefix + m.group(1), m.group(2) is not None
 
 
 class BuiltinSubmoduleImporter(BuiltinImporter):
@@ -266,11 +291,16 @@ def executable_path_hook(path):
     if path == executable:
         return importer
 
-    raise ImportError
+    if path.startswith(executable + '/'):
+        return importer.for_package(path[len(executable) + 1:])
+
+    raise ImportError(path)
 
 
-sys.path.insert(0, executable)
+if executable not in sys.path:
+    sys.path.insert(0, executable)
 sys.path_hooks.insert(0, executable_path_hook)
+sys.path_importer_cache[executable] = importer
 
 # Indicator that modules and resources are built-in rather than on the file system.
 sys.is_standalone_binary = True

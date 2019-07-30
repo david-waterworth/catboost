@@ -1,7 +1,5 @@
-
 #include <catboost/libs/data_new/data_provider_builders.h>
 #include <catboost/libs/train_lib/train_model.h>
-
 #include <library/unittest/registar.h>
 #include <library/json/json_reader.h>
 
@@ -41,6 +39,7 @@ Y_UNIT_TEST_SUITE(TTrainTest) {
                 metaInfo.HasTarget = true;
                 metaInfo.FeaturesLayout = MakeIntrusive<TFeaturesLayout>(
                     FactorCount,
+                    TVector<ui32>{},
                     TVector<ui32>{},
                     TVector<TString>{});
 
@@ -93,6 +92,8 @@ Y_UNIT_TEST_SUITE(TTrainTest) {
             Nothing(),
             Nothing(),
             dataProviders,
+            /*initModel*/ Nothing(),
+            /*initLearnProgress*/ nullptr,
             "",
             &model,
             {&testApprox}
@@ -104,6 +105,8 @@ Y_UNIT_TEST_SUITE(TTrainTest) {
                 Nothing(),
                 Nothing(),
                 dataProviders,
+                /*initModel*/ Nothing(),
+                /*initLearnProgress*/ nullptr,
                 "model_for_test.cbm",
                 nullptr,
                 {&testApprox}

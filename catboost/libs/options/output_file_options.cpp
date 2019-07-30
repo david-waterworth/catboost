@@ -19,6 +19,8 @@ TString NCatboostOptions::GetModelExtensionFromType(const EModelType modelType) 
             return "py";
         case EModelType::Onnx:
             return "onnx";
+        case EModelType::Pmml:
+            return "pmml";
     }
 }
 
@@ -41,8 +43,8 @@ bool NCatboostOptions::TryGetModelTypeFromExtension(const TStringBuf modelExtens
 
 EModelType NCatboostOptions::DefineModelFormat(TStringBuf modelPath) {
     EModelType modelType;
-    TVector<TString> tokens;
-    if (Split(TString(modelPath), ".", tokens) > 1) {
+    TVector<TString> tokens = StringSplitter(modelPath).Split('.').SkipEmpty().ToList<TString>();
+    if (tokens.size() > 1) {
         if (NCatboostOptions::TryGetModelTypeFromExtension(tokens.back(), modelType)) {
             return modelType;
         }
@@ -64,7 +66,6 @@ NCatboostOptions::TOutputFilesOptions::TOutputFilesOptions()
     , BestModelMinTrees("best_model_min_trees", 1)
     , TrainDir("train_dir", "catboost_info")
     , Name("name", "experiment")
-    , MetaFile("meta", "meta.tsv")
     , JsonLogPath("json_log", "catboost_training.json")
     , ProfileLogPath("profile_log", "catboost_profile.log")
     , LearnErrorLogPath("learn_error_log", "learn_error.tsv")
@@ -85,7 +86,7 @@ NCatboostOptions::TOutputFilesOptions::TOutputFilesOptions()
     , VerbosePeriod("verbose", 1)
     , MetricPeriod("metric_period", 1)
     , PredictionTypes("prediction_type", {EPredictionType::RawFormulaVal})
-    , OutputColumns("output_columns", {"DocId", "RawFormulaVal", "Label"})
+    , OutputColumns("output_columns", {"SampleId", "RawFormulaVal", "Label"})
     , RocOutputPath("roc_file", "") {
 }
 
@@ -119,10 +120,6 @@ const TString& NCatboostOptions::TOutputFilesOptions::GetTestErrorFilename() con
 
 const TString& NCatboostOptions::TOutputFilesOptions::GetTimeLeftLogFilename() const {
     return TimeLeftLog.Get();
-}
-
-const TString& NCatboostOptions::TOutputFilesOptions::GetMetaFileFilename() const {
-    return MetaFile.Get();
 }
 
 const TVector<EModelType>& NCatboostOptions::TOutputFilesOptions::GetModelFormats() const {
@@ -173,7 +170,7 @@ const TVector<EPredictionType>& NCatboostOptions::TOutputFilesOptions::GetPredic
 
 const TVector<TString> NCatboostOptions::TOutputFilesOptions::GetOutputColumns(bool datasetHasLabels) const {
     if (!OutputColumns.IsSet()) {
-        TVector<TString> result{"DocId"};
+        TVector<TString> result{"SampleId"};
         if (!PredictionTypes.IsSet()) {
             result.emplace_back("RawFormulaVal");
         } else {
@@ -250,13 +247,13 @@ TString NCatboostOptions::TOutputFilesOptions::GetRocOutputPath() const {
 
 bool NCatboostOptions::TOutputFilesOptions::operator==(const TOutputFilesOptions& rhs) const {
     return std::tie(
-            TrainDir, Name, MetaFile, JsonLogPath, ProfileLogPath, LearnErrorLogPath, TestErrorLogPath,
+            TrainDir, Name, JsonLogPath, ProfileLogPath, LearnErrorLogPath, TestErrorLogPath,
             TimeLeftLog, ResultModelPath, SnapshotPath, ModelFormats, SaveSnapshotFlag,
             AllowWriteFilesFlag, FinalCtrComputationMode, UseBestModel, BestModelMinTrees,
             SnapshotSaveIntervalSeconds, EvalFileName, FstrRegularFileName, FstrInternalFileName, FstrType,
             TrainingOptionsFileName, OutputBordersFileName, RocOutputPath
             ) == std::tie(
-                rhs.TrainDir, rhs.Name, rhs.MetaFile, rhs.JsonLogPath, rhs.ProfileLogPath,
+                rhs.TrainDir, rhs.Name, rhs.JsonLogPath, rhs.ProfileLogPath,
                 rhs.LearnErrorLogPath, rhs.TestErrorLogPath, rhs.TimeLeftLog, rhs.ResultModelPath,
                 rhs.SnapshotPath, rhs.ModelFormats, rhs.SaveSnapshotFlag, rhs.AllowWriteFilesFlag,
                 rhs.FinalCtrComputationMode, rhs.UseBestModel, rhs.BestModelMinTrees,
@@ -273,14 +270,14 @@ bool NCatboostOptions::TOutputFilesOptions::operator!=(const TOutputFilesOptions
 void NCatboostOptions::TOutputFilesOptions::Load(const NJson::TJsonValue& options) {
     CheckedLoad(
             options,
-            &TrainDir, &Name, &MetaFile, &JsonLogPath, &ProfileLogPath, &LearnErrorLogPath,
+            &TrainDir, &Name, &JsonLogPath, &ProfileLogPath, &LearnErrorLogPath,
             &TestErrorLogPath, &TimeLeftLog, &ResultModelPath, &SnapshotPath, &ModelFormats,
             &SaveSnapshotFlag, &AllowWriteFilesFlag, &FinalCtrComputationMode, &UseBestModel,
             &BestModelMinTrees, &SnapshotSaveIntervalSeconds, &EvalFileName, &OutputColumns,
             &FstrRegularFileName, &FstrInternalFileName, &FstrType, &TrainingOptionsFileName, &MetricPeriod,
             &VerbosePeriod, &PredictionTypes, &OutputBordersFileName, &RocOutputPath
             );
-    if (!VerbosePeriod.IsSet()) {
+    if (!VerbosePeriod.IsSet() || VerbosePeriod.Get() == 1) {
         VerbosePeriod.Set(MetricPeriod.Get());
     }
     Validate();
@@ -289,7 +286,7 @@ void NCatboostOptions::TOutputFilesOptions::Load(const NJson::TJsonValue& option
 void NCatboostOptions::TOutputFilesOptions::Save(NJson::TJsonValue* options) const {
     SaveFields(
             options,
-            TrainDir, Name, MetaFile, JsonLogPath, ProfileLogPath, LearnErrorLogPath, TestErrorLogPath,
+            TrainDir, Name, JsonLogPath, ProfileLogPath, LearnErrorLogPath, TestErrorLogPath,
             TimeLeftLog, ResultModelPath, SnapshotPath, ModelFormats, SaveSnapshotFlag,
             AllowWriteFilesFlag, FinalCtrComputationMode, UseBestModel, BestModelMinTrees,
             SnapshotSaveIntervalSeconds, EvalFileName, OutputColumns, FstrRegularFileName,
@@ -312,8 +309,11 @@ void NCatboostOptions::TOutputFilesOptions::Validate() const {
         CB_ENSURE(!SaveSnapshotFlag.Get(),
                 "allow_writing_files is set to False, and save_snapshot is set to True.");
     }
-    CB_ENSURE(GetMetricPeriod() != 0 && (GetVerbosePeriod() % GetMetricPeriod() == 0),
-            "verbose should be a multiple of metric_period, got " << GetVerbosePeriod() << " vs " << GetMetricPeriod());
+    CB_ENSURE(GetVerbosePeriod() >= 0, "Verbose period should be nonnegative.");
+    CB_ENSURE(GetMetricPeriod() > 0, "Metric period should be positive.");
+    CB_ENSURE(GetVerbosePeriod() % GetMetricPeriod() == 0,
+        "verbose should be a multiple of metric_period, got " <<
+        GetVerbosePeriod() << " vs " << GetMetricPeriod());
 }
 
 TString NCatboostOptions::TOutputFilesOptions::GetFullPath(const TString& fileName) const {

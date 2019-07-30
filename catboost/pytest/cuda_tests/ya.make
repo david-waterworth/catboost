@@ -15,11 +15,13 @@ DEPENDS(
 )
 
 SIZE(MEDIUM)
-REQUIREMENTS(network:full)
+
+TAG(ya:yt)
+
+YT_SPEC(catboost/pytest/cuda_tests/yt_spec.json)
 
 IF(AUTOCHECK)
     FORK_SUBTESTS()
-    SPLIT_FACTOR(20)
 ENDIF()
 
 PEERDIR(

@@ -25,6 +25,11 @@ IF (PYTHON2)
     )
 ENDIF()
 
+NO_CHECK_IMPORTS(
+    __tests__.*  # all test modules get imported when tests are run
+    _pytest.*
+)
+
 PY_SRCS(
     TOP_LEVEL
     _pytest/_argcomplete.py
@@ -82,6 +87,13 @@ PY_SRCS(
     _pytest/warnings.py
     _pytest/warning_types.py
     pytest.py
+)
+
+RESOURCE_FILES(
+    PREFIX contrib/python/pytest/
+    .dist-info/METADATA
+    .dist-info/entry_points.txt
+    .dist-info/top_level.txt
 )
 
 NO_LINT()

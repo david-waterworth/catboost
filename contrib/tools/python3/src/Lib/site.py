@@ -458,13 +458,6 @@ def venv(known_paths):
     env = os.environ
     if sys.platform == 'darwin' and '__PYVENV_LAUNCHER__' in env:
         executable = sys._base_executable = os.environ['__PYVENV_LAUNCHER__']
-    elif sys.platform == 'win32' and '__PYVENV_LAUNCHER__' in env:
-        executable = sys.executable
-        import _winapi
-        sys._base_executable = _winapi.GetModuleFileName(0)
-        # bpo-35873: Clear the environment variable to avoid it being
-        # inherited by child processes.
-        del os.environ['__PYVENV_LAUNCHER__']
     else:
         executable = sys.executable
     exe_dir, _ = os.path.split(os.path.abspath(executable))
@@ -560,17 +553,17 @@ def main():
     global ENABLE_USER_SITE
 
     orig_path = sys.path[:]
-    known_paths = removeduppaths()
+    #known_paths = removeduppaths()
     if orig_path != sys.path:
         # removeduppaths() might make sys.path absolute.
         # fix __file__ and __cached__ of already imported modules too.
         abs_paths()
 
-    known_paths = venv(known_paths)
+    #known_paths = venv(known_paths)
     if ENABLE_USER_SITE is None:
         ENABLE_USER_SITE = check_enableusersite()
-    known_paths = addusersitepackages(known_paths)
-    known_paths = addsitepackages(known_paths)
+    #known_paths = addusersitepackages(known_paths)
+    #known_paths = addsitepackages(known_paths)
     setquit()
     setcopyright()
     sethelper()

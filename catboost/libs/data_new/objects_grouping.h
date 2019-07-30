@@ -233,6 +233,13 @@ namespace NCB {
         bool oldCvStyle = false
     );
 
+    void TrainTestSplit(
+        const TObjectsGrouping& objectsGrouping,
+        double trainPart,
+        TArraySubsetIndexing<ui32>* trainIndices,
+        TArraySubsetIndexing<ui32>* testIndices
+    );
+
     template <class TClassId>
     TVector<TArraySubsetIndexing<ui32>> StratifiedSplit(
         const TObjectsGrouping& objectsGrouping,
@@ -298,4 +305,14 @@ namespace NCB {
         }
         return result;
     }
+
+    TVector<TArraySubsetIndexing<ui32>> SplitByObjects(
+        const TObjectsGrouping& objectsGrouping,
+        ui32 partSizeInObjects
+    );
+
+    TVector<TArraySubsetIndexing<ui32>> SplitByGroups(
+        const TObjectsGrouping& objectsGrouping,
+        ui32 partSizeInGroups
+    );
 }

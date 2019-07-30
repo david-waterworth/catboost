@@ -1,3 +1,113 @@
+# Release 0.16.1
+
+## Breaking changes:
+- parameter `fold_count` is now called `cv` in [`grid_search()`](https://catboost.ai/docs/concepts/python-reference_catboost_grid_search.html) and [`randomized_search`](https://catboost.ai/docs/concepts/python-reference_catboost_randomized_search.html)
+- cv results are now returned from `grid_search()` and `randomized_search()` in `res['cv_results']` field
+
+## New features:
+- R-language function `catboost.save_model()` now supports PMML, ONNX and other formats
+- Parameter `monotone_constraints` in python API allows specifying numerical features that the prediction shall depend on monotonically
+
+## Bug fixes:
+- Fixed `eval_metric` calculation for training with weights (in release 0.16 evaluation of a metric that was equal to an optimized loss did not use weights by default, so overfitting detector worked incorrectly)
+
+## Improvements:
+- Added option `verbose` to `grid_search()` and `randomized_search()`
+- Added [tutorial](https://github.com/catboost/tutorials/blob/master/hyperparameters_tuning/hyperparameters_tuning.ipynb) on `grid_search()` and `randomized_search()`
+
+
+# Release 0.16
+
+## Breaking changes:
+- `MultiClass` loss has now the same sign as Logloss. It had the other sign before and was maximized, now it is minimized.
+- `CatBoostRegressor.score` now returns the value of $R^2$ metric instead of RMSE to be more consistent with the behavior of scikit-learn regressors.
+- Changed metric parameter `use_weights` default value to false (except for ranking metrics)
+
+## New features:
+- It is now possible to apply model on GPU
+- We have published two new realworld datasets with monotonic constraints, `catboost.datasets.monotonic1()` and `catboost.datasets.monotonic2()`. Before that  there was only `california_housing` dataset in open-source with monotonic constraints. Now you can use these two to benchmark algorithms with monotonic constraints.
+- We've added several new metrics to catboost, including `DCG`, `FairLoss`, `HammingLoss`, `NormalizedGini` and `FilteredNDCG`
+- Introduced efficient `GridSearch` and `RandomSearch` implementations.
+- `get_all_params()` Python function returns the values of all training parameters, both user-defined and default.
+- Added more synonyms for training parameters to be more compatible with other GBDT libraries.
+
+## Speedups:
+- AUC metric is computationally very expensive. We've implemented parallelized calculation of this metric, now it can be calculated on every iteration (or every k-th iteration) about 4x faster.
+
+## Educational materials:
+- We've improved our command-line tutorial, now it has examples of files and more information.
+
+## Fixes:
+- Automatic `Logloss` or `MultiClass` loss function deduction for `CatBoostClassifier.fit` now also works if the training dataset is specified as `Pool` or filename string.
+- And some other fixes
+
+
+# Release 0.15.2
+
+## Breaking changes:
+- Function `get_feature_statistics` is replaced by `calc_feature_statistics`
+- Scoring function `Correlation` is renamed to `Cosine`
+- Parameter `efb_max_conflict_fraction` is renamed to `sparse_features_conflict_fraction`
+
+## New features:
+- Models can be saved in PMML format now.
+> **Note:**  PMML does not have full categorical features support, so to have the model in PMML format for datasets with categorical features you need to use set `one_hot_max_size` parameter to some large value, so that all categorical features are one-hot encoded
+- Feature names can be used to specify ignored features
+
+## Bug fixes, including:
+- Fixed restarting of CV on GPU for datasets without categorical features
+- Fixed learning continuation errors with changed dataset (PR #879) and with model loaded from file (#884)
+- Fixed NativeLib for JDK 9+ (PR #857)
+
+
+# Release 0.15.1
+
+## Bug fixes
+- restored parameter `fstr_type` in Python and R interfaces
+
+
+# Release 0.15
+
+## Breaking changes
+- cv is now stratified by default for `Logloss`, `MultiClass` and `MultiClassOneVsAll`.
+- We have removed `border` parameter of `Logloss` metric. You need to use `target_border` as a separate training parameter now.
+- `CatBoostClassifier` now runs `MultiClass` if more than 2 different values are present in training dataset labels.
+- `model.best_score_["validation_0"]` is replaced with `model.best_score_["validation"]` if a single validation dataset is present.
+- `get_object_importance` function parameter `ostr_type` is renamed to `type` in Python and R.
+
+## Model analysis
+- Tree visualisation by [@karina-usmanova](https://github.com/karina-usmanova).
+- New feature analysis: plotting information about how a feature was used in the model by [@alexrogozin12](https://github.com/alexrogozin12).
+- Added `plot` parameter to `get_roc_curve`, `get_fpr_curve` and `get_fnr_curve` functions from `catboost.utils`.
+- Supported prettified format for all types of feature importances.
+
+## New ways of doing predictions
+- Rust applier by [@shuternay](https://github.com/shuternay).
+- DotNet applier by [@17minutes](https://github.com/17minutes).
+- One-hot encoding for categorical features in CatBoost CoreML model by Kseniya Valchuk and Ekaterina Pogodina.
+
+
+## New objectives
+- Expectile Regression by [@david-waterworth](https://github.com/david-waterworth).
+- Huber loss by [@atsky](https://github.com/atsky).
+
+## Speedups
+- Speed up of shap values calculation for single object or for small number of objects by [@Lokutrus](https://github.com/Lokutrus).
+- Cheap preprocessing and no fighting of overfitting if there is little amount of iterations (since you will not overfit anyway).
+
+## New functionality
+- Prediction of leaf indices.
+
+## New educational materials
+- Rust tutorial by [@shuternay](https://github.com/shuternay).
+- C# tutorial.
+- Leaf indices.
+- Tree visualisation tutorial by [@karina-usmanova](https://github.com/karina-usmanova).
+- Google Colab tutorial for regression in catboost by [@col14m](https://github.com/col14m).
+
+And a set of fixes for your issues.
+
+
 # Release 0.14.2
 
 ## New features

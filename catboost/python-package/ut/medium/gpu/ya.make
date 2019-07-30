@@ -21,9 +21,15 @@ TEST_SRCS(
     test.py
 )
 
-NO_CHECK_IMPORTS(widget.ipythonwidget)
+SIZE(LARGE)
 
-SIZE(MEDIUM)
+IF (SANITIZER_TYPE)
+    TAG(ya:fat ya:not_autocheck)
+ELSE()
+    TAG(ya:fat ya:yt ya:noretries)
+ENDIF()
+
+YT_SPEC(catboost/pytest/cuda_tests/yt_spec.json)
 
 DATA(
     arcadia/catboost/pytest/data
@@ -31,7 +37,6 @@ DATA(
 )
 
 DEPENDS(
-    catboost/tools/limited_precision_json_diff
     catboost/tools/model_comparator
     catboost/python-package/catboost
     catboost/python-package/ut/medium/python_binary

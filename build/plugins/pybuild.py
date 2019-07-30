@@ -1,4 +1,6 @@
 import os
+import collections
+
 import ymake
 from _common import stripext, rootrel_arc_src, tobuilddir, listid, resolve_to_ymake_path, generate_chunks
 
@@ -74,10 +76,16 @@ def parse_pyx_includes(filename, path, source_root, seen=None):
             for e in parse_pyx_includes(incname, incpath, source_root, seen):
                 yield e
         else:
-            # There might be arcadia root relative include.
+            # There might be arcadia root or cython relative include.
             # Don't treat such file as missing, because there must be PEERDIR on py_library
             # which contains it.
-            if not os.path.exists(normpath(source_root, incfile)):
+            for path in [
+                source_root,
+                source_root + "/contrib/tools/cython/Cython/Includes",
+            ]:
+                if os.path.exists(normpath(path, incfile)):
+                    break
+            else:
                 ymake.report_configure_error("'{}' includes missing file: {} ({})".format(path, incfile, abs_path))
 
 def has_pyx(args):
@@ -91,15 +99,15 @@ def is_generated(path, unit):
     return not unit.resolve(path).startswith('$S/')
 
 
-def add_python_lint_checks(unit, files):
+def add_python_lint_checks(unit, py_ver, files):
     if files and unit.get('LINT_LEVEL_VALUE') != "none":
         resolved_files = []
         for path in files:
             resolved = unit.resolve_arc_path([path])
             if resolved != path:  # path was resolved
                 resolved_files.append(resolved)
-        unit.onadd_check(["PEP8"] + resolved_files)
-        unit.onadd_check(["PYFLAKES"] + resolved_files)
+        unit.onadd_check(["PEP8_{}".format(py_ver)] + resolved_files)
+        unit.onadd_check(["PYFLAKES_{}".format(py_ver)] + resolved_files)
 
 
 def is_py3(unit):
@@ -111,14 +119,22 @@ def py_program(unit, py3):
     Documentation: https://wiki.yandex-team.ru/devtools/commandsandvars/py_srcs/#modulpyprogramimakrospymain
     """
     if py3:
-        unit.onpeerdir(['library/python/runtime_py3/main'])
+        peers = ['library/python/runtime_py3/main']
+        if unit.get('PYTHON_SQLITE3') != 'no':
+            peers.append('contrib/tools/python3/src/Modules/_sqlite')
     else:
-        unit.onpeerdir(['library/python/runtime/main'])
-    unit.onadd_check_py_imports()
+        peers = ['library/python/runtime/main']
+        if unit.get('PYTHON_SQLITE3') != 'no':
+            peers.append('contrib/tools/python/src/Modules/_sqlite')
+    unit.onpeerdir(peers)
+    if unit.get('MODULE_TYPE') == 'PROGRAM':  # can not check DLL
+        unit.onadd_check_py_imports()
 
 
 def onpy_srcs(unit, *args):
     """
+        @usage PY_SRCS({| CYTHON_C} { | TOP_LEVEL | NAMESPACE ns} Files...)
+
         PY_SRCS() - is rule to build extended versions of Python interpreters and containing all application code in its executable file. It can be used to collect only the executables but not shared libraries, and, in particular, not to collect the modules that are imported using import directive.
         The main disadvantage is the lack of IDE support; There is also no readline yet.
         The application can be collect from any of the sources from which the C library, and with the help of PY_SRCS .py , .pyx,.proto and .swg files.
@@ -129,10 +145,11 @@ def onpy_srcs(unit, *args):
 
         Example of library declaration with PY_SRCS():
         PY_LIBRARY(mymodule)
-        PY_SRCS({| CYTHON_C} { | TOP_LEVEL | NAMESPACE ns} a.py sub/dir/b.py e.proto sub/dir/f.proto c.pyx sub/dir/d.pyx g.swg sub/dir/h.swg)
+        PY_SRCS(a.py sub/dir/b.py e.proto sub/dir/f.proto c.pyx sub/dir/d.pyx g.swg sub/dir/h.swg)
         END()
 
-        Documentation: https://wiki.yandex-team.ru/devtools/commandsandvars/py_srcs/
+        PY_REGISTER honors Python2 and Python3 differences and adjusts itself to Python version of a current module
+        Documentation: https://wiki.yandex-team.ru/arcadia/python/pysrcs/#modulipylibrarypy3libraryimakrospysrcs
     """
     # Each file arg must either be a path, or "${...}/buildpath=modname", where
     # "${...}/buildpath" part will be used as a file source in a future macro,
@@ -146,8 +163,8 @@ def onpy_srcs(unit, *args):
     if not upath.startswith('contrib/tools/python') and not upath.startswith('library/python/runtime') and unit.get('NO_PYTHON_INCLS') != 'yes':
         unit.onpeerdir(['contrib/libs/python'])
 
-    is_program = unit.get('MODULE_TYPE') == 'PROGRAM'
-    if is_program:
+    unit_needs_main = unit.get('MODULE_TYPE') in ('PROGRAM', 'DLL')
+    if unit_needs_main:
         py_program(unit, py3)
 
     py_namespace_value = unit.get('PY_NAMESPACE_VALUE')
@@ -222,7 +239,7 @@ def onpy_srcs(unit, *args):
             else:
                 path = arg
                 main_py = (path == '__main__.py' or path.endswith('/__main__.py'))
-                if not py3 and main_py:
+                if not py3 and unit_needs_main and main_py:
                     mod = '__main__'
                 else:
                     if arg.startswith('../'):
@@ -237,7 +254,7 @@ def onpy_srcs(unit, *args):
 
             if main_mod:
                 py_main(unit, mod + ":main")
-            elif py3 and main_py:
+            elif py3 and unit_needs_main and main_py:
                 py_main(unit, mod)
 
             pathmod = (path, mod)
@@ -269,6 +286,10 @@ def onpy_srcs(unit, *args):
 
     if pyxs:
         files2res = set()
+        # Include map stores files which were included in the processing pyx file,
+        # to be able to find source code of the included file inside generated file
+        # for currently processing pyx file.
+        include_map = collections.defaultdict(set)
 
         if cython_coverage:
             def process_pyx(filename, path, out_suffix, noext):
@@ -285,15 +306,17 @@ def onpy_srcs(unit, *args):
                 # used includes
                 for entry in parse_pyx_includes(filename, path, unit.resolve('$S')):
                     files2res.add(entry)
+                    include_arc_rel = entry[0]
+                    include_map[filename].add(include_arc_rel)
         else:
             def process_pyx(filename, path, out_suffix, noext):
                 pass
 
         for pyxs, cython, out_suffix, noext in [
-            (pyxs_c, unit.onbuildwith_cython_c_dep, ".c", False),
-            (pyxs_c_h, unit.onbuildwith_cython_c_h, ".c", True),
-            (pyxs_c_api_h, unit.onbuildwith_cython_c_api_h, ".c", True),
-            (pyxs_cpp, unit.onbuildwith_cython_cpp_dep, ".cpp", False),
+            (pyxs_c, unit.on_buildwith_cython_c_dep, ".c", False),
+            (pyxs_c_h, unit.on_buildwith_cython_c_h, ".c", True),
+            (pyxs_c_api_h, unit.on_buildwith_cython_c_api_h, ".c", True),
+            (pyxs_cpp, unit.on_buildwith_cython_cpp_dep, ".cpp", False),
         ]:
             for path, mod in pyxs:
                 filename = rootrel_arc_src(path, unit)
@@ -322,6 +345,13 @@ def onpy_srcs(unit, *args):
             # Compile original and generated sources into target for proper cython coverage calculation
             unit.onresource_files([x for name, path in files2res for x in ('DEST', name, path)])
 
+        if include_map:
+            data = []
+            prefix = 'resfs/cython/include'
+            for line in sorted('{}/{}={}'.format(prefix, filename, ':'.join(sorted(files))) for filename, files in include_map.iteritems()):
+                data += ['-', line]
+            unit.onresource(data)
+
     if pys:
         pys_seen = set()
         pys_dups = {m for _, m in pys if (m in pys_seen or pys_seen.add(m))}
@@ -337,11 +367,11 @@ def onpy_srcs(unit, *args):
                     res += ['DEST', dest, path]
                 if with_pyc:
                     root_rel_path = rootrel_arc_src(path, unit)
-                    unit.onpy3_compile_bytecode([root_rel_path + '-', path])
+                    unit.on_py3_compile_bytecode([root_rel_path + '-', path])
                     res += ['DEST', dest + '.yapyc3', path + '.yapyc3']
 
             unit.onresource_files(res)
-            #add_python_lint_checks(unit, [path for path, mod in pys])
+            add_python_lint_checks(unit, 3, [path for path, mod in pys])
         else:
             for path, mod in pys:
                 root_rel_path = rootrel_arc_src(path, unit)
@@ -354,11 +384,11 @@ def onpy_srcs(unit, *args):
                 if with_pyc:
                     src = unit.resolve_arc_path(path) or path
                     dst = tobuilddir(src) + '.yapyc'
-                    unit.onpy_compile_bytecode([root_rel_path + '-', src])
+                    unit.on_py_compile_bytecode([root_rel_path + '-', src])
                     res += [dst, '/py_code/' + mod]
 
             unit.onresource(res)
-            add_python_lint_checks(unit, [path for path, mod in pys])
+            add_python_lint_checks(unit, 2, [path for path, mod in pys])
 
     if protos:
         if not upath.startswith('contrib/libs/protobuf/python/google_lib'):
@@ -367,7 +397,7 @@ def onpy_srcs(unit, *args):
         unit.onpeerdir(unit.get("PY_PROTO_DEPS").split())
 
         proto_paths = [path for path, mod in protos]
-        unit.ongenerate_py_protos_internal(proto_paths)
+        unit.on_generate_py_protos_internal(proto_paths)
         unit.onpy_srcs([
             pb2_arg(py_suf, path, mod, unit)
             for path, mod in protos
@@ -384,7 +414,7 @@ def onpy_srcs(unit, *args):
             ]
 
             for pb_cc_outs_chunk in generate_chunks(pb_cc_outs, 10):
-                if is_program:
+                if unit_needs_main:
                     unit.onjoin_srcs(['join_' + listid(pb_cc_outs_chunk) + '.cpp'] + pb_cc_outs_chunk)
                 else:
                     unit.onjoin_srcs_global(['join_' + listid(pb_cc_outs_chunk) + '.cpp'] + pb_cc_outs_chunk)
@@ -393,7 +423,7 @@ def onpy_srcs(unit, *args):
         if not upath.startswith('contrib/libs/protobuf/python/google_lib'):
             unit.onpeerdir(['contrib/libs/protobuf/python/google_lib'])
 
-        unit.ongenerate_py_evs_internal([path for path, mod in evs])
+        unit.on_generate_py_evs_internal([path for path, mod in evs])
         unit.onpy_srcs([ev_arg(path, mod, unit) for path, mod in evs])
 
         if optimize_proto:
@@ -401,7 +431,7 @@ def onpy_srcs(unit, *args):
 
             pb_cc_outs = [ev_cc_arg(path, unit) for path, _ in evs]
             for pb_cc_outs_chunk in generate_chunks(pb_cc_outs, 10):
-                if is_program:
+                if unit_needs_main:
                     unit.onjoin_srcs(['join_' + listid(pb_cc_outs_chunk) + '.cpp'] + pb_cc_outs_chunk)
                 else:
                     unit.onjoin_srcs_global(['join_' + listid(pb_cc_outs_chunk) + '.cpp'] + pb_cc_outs_chunk)
@@ -430,6 +460,12 @@ def ontest_srcs(unit, *args):
 
 
 def onpy_doctests(unit, *args):
+    """
+    @usage PY_DOCTEST(Packages...)
+
+    Add to the test doctests for specified Python packages
+    The packages should be part of a test (listed as sources of the test or its PEERDIRs).
+    """
     if unit.get('PY3TEST_BIN' if is_py3(unit) else 'PYTEST_BIN') != 'no':
         unit.onresource(['-', 'PY_DOCTEST_PACKAGES="{}"'.format(' '.join(args))])
 
@@ -443,40 +479,47 @@ def py_register(unit, func, py3):
 
 def onpy_register(unit, *args):
     """
-    Python knows about which built-ins can be imported, due to their registration in the Assembly or at the start of the interpreter.
+    @usage: PY_REGISTER([package.]module_name[=module_name])
 
+    Python knows about which built-ins can be imported, due to their registration in the Assembly or at the start of the interpreter.
     All modules from the sources listed in PY_SRCS() are registered automatically.
     To register the modules from the sources in the SRCS(), you need to use PY_REGISTER().
+
+    PY_REGISTER(module_name) initializes module globally via call to initmodule_name()
+    PY_REGISTER(package.module_name) initializes module in the specified package
+    It renames its init function with CFLAGS(-Dinitmodule_name=init7package11module_name)
+    or CFLAGS(-DPyInit_module_name=PyInit_7package11module_name)
+
+    Documentation: https://wiki.yandex-team.ru/arcadia/python/pysrcs/#makrospyregister
     """
 
     py3 = is_py3(unit)
 
     for name in args:
-        if '=' in name:
-            fullname, shortname = name.split('=', 1)
-            assert '.' not in shortname, shortname
-            assert fullname == shortname or fullname.endswith('.' + shortname), fullname
-            py_register(unit, fullname, py3)
+        assert '=' not in name, name
+        py_register(unit, name, py3)
+        if '.' in name:
+            shortname = name.rsplit('.', 1)[1]
             if py3:
-                unit.oncflags(['-DPyInit_{}=PyInit_{}'.format(shortname, mangle(fullname))])
+                unit.oncflags(['-DPyInit_{}=PyInit_{}'.format(shortname, mangle(name))])
             else:
-                unit.oncflags(['-Dinit{}=init{}'.format(shortname, mangle(fullname))])
-        else:
-            py_register(unit, name, py3)
+                unit.oncflags(['-Dinit{}=init{}'.format(shortname, mangle(name))])
 
 
 def py_main(unit, arg):
-    py_program(unit, is_py3(unit))
+    unit_needs_main = unit.get('MODULE_TYPE') in ('PROGRAM', 'DLL')
+    if unit_needs_main:
+        py_program(unit, is_py3(unit))
     unit.onresource(['-', 'PY_MAIN={}'.format(arg)])
 
 
 def onpy_main(unit, arg):
     """
-        @usage: PY_MAIN(pkg.mod[:func])
+        @usage: PY_MAIN(package.module[:func])
 
-        Specifies the function from which to start executing a python program
+        Specifies the module or function from which to start executing a python program
 
-        Documentation: https://wiki.yandex-team.ru/devtools/commandsandvars/py_srcs/
+        Documentation: https://wiki.yandex-team.ru/arcadia/python/pysrcs/#modulipyprogrampy3programimakrospymain
     """
     if ':' not in arg:
         arg += ':main'

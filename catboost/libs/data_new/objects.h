@@ -19,6 +19,7 @@
 #include <catboost/libs/options/binarization_options.h>
 
 #include <library/binsaver/bin_saver.h>
+#include <library/dbg_output/dump.h>
 #include <library/threading/local_executor/local_executor.h>
 
 #include <util/generic/array_ref.h>
@@ -32,6 +33,9 @@
 #include <util/system/types.h>
 
 #include <utility>
+
+
+class IOutputStream;
 
 
 namespace NCB {
@@ -126,10 +130,7 @@ namespace NCB {
             NPar::TLocalExecutor* localExecutor
         ) const = 0;
 
-        /*
-         * GetFeaturesLayout, GetGroupIds, GetSubgroupIds are common for all implementations,
-         *  so they're in this base class
-         */
+        // The following Get* functions are common for all implementations, so they're in this base class
 
         TFeaturesLayoutPtr GetFeaturesLayout() const {
             return CommonData.FeaturesLayout;
@@ -179,6 +180,7 @@ namespace NCB {
     };
 
     using TObjectsDataProviderPtr = TIntrusivePtr<TObjectsDataProvider>;
+    using TObjectsDataProviderConstPtr = TIntrusiveConstPtr<TObjectsDataProvider>;
 
 
     // for use while building and storing this part in TRawObjectsDataProvider
@@ -189,6 +191,7 @@ namespace NCB {
          */
         TVector<THolder<TFloatValuesHolder>> FloatFeatures; // [floatFeatureIdx]
         TVector<THolder<THashedCatValuesHolder>> CatFeatures; // [catFeatureIdx]
+        TVector<THolder<TStringTextValuesHolder>> TextFeatures; // [textFeatureIdx]
 
     public:
         bool operator==(const TRawObjectsData& rhs) const;
@@ -248,6 +251,14 @@ namespace NCB {
             NPar::TLocalExecutor* localExecutor
         ) const override;
 
+        // needed for effective application of models
+        TIntrusiveConstPtr<TRawObjectsDataProvider> GetWithPermutedConsecutiveArrayFeaturesData(
+            NPar::TLocalExecutor* localExecutor,
+
+            // if result is already in the same order as this return Nothing()
+            TMaybe<TVector<ui32>>* srcArrayPermutation
+        ) const;
+
         // needed for low-level optimizations in CPU applying code
         const TFeaturesArraySubsetIndexing& GetFeaturesArraySubsetIndexing() const {
             return *CommonData.SubsetIndexing;
@@ -265,6 +276,13 @@ namespace NCB {
          */
         TMaybeData<const THashedCatValuesHolder*> GetCatFeature(ui32 catFeatureIdx) const {
             return MakeMaybeData<const THashedCatValuesHolder>(Data.CatFeatures[catFeatureIdx]);
+        }
+
+        /* can return nullptr if this feature is unavailable
+         * (ignored or this data provider contains only subset of features)
+         */
+        TMaybeData<const TStringTextValuesHolder*> GetTextFeature(ui32 textFeatureIdx) const {
+            return MakeMaybeData<const TStringTextValuesHolder>(Data.TextFeatures[textFeatureIdx]);
         }
 
         /* set functions are needed for current python mutable Pool interface
@@ -295,8 +313,11 @@ namespace NCB {
          */
         TVector<THolder<IQuantizedFloatValuesHolder>> FloatFeatures; // [floatFeatureIdx]
         TVector<THolder<IQuantizedCatValuesHolder>> CatFeatures; // [catFeatureIdx]
+        TVector<THolder<TTokenizedTextValuesHolder>> TextFeatures; // [textFeatureIdx]
 
         TQuantizedFeaturesInfoPtr QuantizedFeaturesInfo;
+
+        mutable TMaybe<ui32> CachedFeaturesCheckSum;
 
     public:
         bool operator==(const TQuantizedObjectsData& rhs) const;
@@ -363,6 +384,11 @@ namespace NCB {
             NPar::TLocalExecutor* localExecutor
         ) const override;
 
+        TIntrusiveConstPtr<TQuantizedObjectsDataProvider> GetWithPermutedConsecutiveArrayFeaturesData(
+            NPar::TLocalExecutor* localExecutor,
+            TMaybe<TVector<ui32>>* srcArrayPermutation
+        ) const;
+
         /* can return nullptr if this feature is unavailable
          * (ignored or this data provider contains only subset of features)
          */
@@ -375,6 +401,13 @@ namespace NCB {
          */
         TMaybeData<const IQuantizedCatValuesHolder*> GetCatFeature(ui32 catFeatureIdx) const {
             return MakeMaybeData<const IQuantizedCatValuesHolder>(Data.CatFeatures[catFeatureIdx]);
+        }
+
+        /* can return nullptr if this feature is unavailable
+         * (ignored or this data provider contains only subset of features)
+         */
+        TMaybeData<const TTokenizedTextValuesHolder*> GetTextFeature(ui32 textFeatureIdx) const {
+            return MakeMaybeData<const TTokenizedTextValuesHolder>(Data.TextFeatures[textFeatureIdx]);
         }
 
         TQuantizedFeaturesInfoPtr GetQuantizedFeaturesInfo() const {
@@ -391,17 +424,23 @@ namespace NCB {
             Data.SaveNonSharedPart(binSaver);
         }
 
+        bool AllFeaturesDataIsCompressedArrays() const;
+
     protected:
         TQuantizedObjectsData Data;
     };
 
     using TQuantizedObjectsDataProviderPtr = TIntrusivePtr<TQuantizedObjectsDataProvider>;
 
+    void DbgDumpQuantizedFeatures(
+        const TQuantizedObjectsDataProvider& quantizedObjectsDataProvider,
+        IOutputStream* out
+    );
+
 
     struct TExclusiveFeatureBundlesData {
         // lookups
-        TVector<TMaybe<TExclusiveBundleIndex>> FloatFeatureToBundlePart; // [floatFeatureIdx]
-        TVector<TMaybe<TExclusiveBundleIndex>> CatFeatureToBundlePart; // [catFeatureIdx]
+        TVector<TMaybe<TExclusiveBundleIndex>> FlatFeatureIndexToBundlePart; // [flatFeatureIdx]
 
         TVector<TExclusiveFeaturesBundle> MetaData; // [bundleIdx]
 
@@ -424,8 +463,7 @@ namespace NCB {
 
     struct TPackedBinaryFeaturesData {
         // lookups
-        TVector<TMaybe<TPackedBinaryIndex>> FloatFeatureToPackedBinaryIndex; // [floatFeatureIdx]
-        TVector<TMaybe<TPackedBinaryIndex>> CatFeatureToPackedBinaryIndex;// [catFeatureIdx]
+        TVector<TMaybe<TPackedBinaryIndex>> FlatFeatureIndexToPackedBinaryIndex; // [flatFeatureIdx]
         TVector<std::pair<EFeatureType, ui32>> PackedBinaryToSrcIndex; // [linearPackedBinaryIndex]
 
         // shared source data, apply SubsetIndexing
@@ -443,9 +481,25 @@ namespace NCB {
 
         void Save(const TArraySubsetIndexing<ui32>& subsetIndexing, IBinSaver* binSaver) const;
         void Load(IBinSaver* binSaver);
-
-        TPackedBinaryIndex AddFeature(EFeatureType featureType, ui32 perTypeFeatureIdx);
     };
+
+}
+
+template <>
+struct TDumper<TMaybe<NCB::TPackedBinaryIndex>> {
+    template <class S>
+    static inline void Dump(S& s, const TMaybe<NCB::TPackedBinaryIndex>& maybePackedBinaryIndex) {
+        if (maybePackedBinaryIndex) {
+            s << DbgDump(*maybePackedBinaryIndex);
+        } else {
+            s << '-';
+        }
+    }
+};
+
+
+namespace NCB {
+    TString DbgDumpMetaData(const TPackedBinaryFeaturesData& packedBinaryFeaturesData);
 
     using TPackedBinaryFeaturesArraySubset
         = TArraySubset<const TMaybeOwningArrayHolder<TBinaryFeaturesPack>, ui32>;
@@ -498,16 +552,7 @@ namespace NCB {
         }
 
         TMaybeData<const TQuantizedFloatValuesHolder*> GetNonPackedFloatFeature(ui32 floatFeatureIdx) const {
-            CB_ENSURE_INTERNAL(
-                !PackedBinaryFeaturesData.FloatFeatureToPackedBinaryIndex[floatFeatureIdx],
-                "Called TQuantizedForCPUObjectsDataProvider::GetFloatFeature for binary packed float feature #"
-                << floatFeatureIdx
-            );
-            CB_ENSURE_INTERNAL(
-                !ExclusiveFeatureBundlesData.FloatFeatureToBundlePart[floatFeatureIdx],
-                "Called TQuantizedForCPUObjectsDataProvider::GetFloatFeature for bundled float feature #"
-                << floatFeatureIdx
-            );
+            CheckFeatureIsNotBinaryPackedOrBundled(EFeatureType::Float, "Float", floatFeatureIdx);
             return MakeMaybeData(
                 // checked above that this cast is safe
                 static_cast<const TQuantizedFloatValuesHolder*>(
@@ -522,16 +567,7 @@ namespace NCB {
         }
 
         TMaybeData<const TQuantizedCatValuesHolder*> GetNonPackedCatFeature(ui32 catFeatureIdx) const {
-            CB_ENSURE_INTERNAL(
-                !PackedBinaryFeaturesData.CatFeatureToPackedBinaryIndex[catFeatureIdx],
-                "Called TQuantizedForCPUObjectsDataProvider::GetCatFeature for binary packed cat feature #"
-                << catFeatureIdx
-            );
-            CB_ENSURE_INTERNAL(
-                !ExclusiveFeatureBundlesData.CatFeatureToBundlePart[catFeatureIdx],
-                "Called TQuantizedForCPUObjectsDataProvider::GetCatFeature for bundled cat feature #"
-                << catFeatureIdx
-            );
+            CheckFeatureIsNotBinaryPackedOrBundled(EFeatureType::Categorical, "Cat", catFeatureIdx);
             return MakeMaybeData(
                 // checked above that this cast is safe
                 static_cast<const TQuantizedCatValuesHolder*>(
@@ -566,20 +602,17 @@ namespace NCB {
         }
 
         TMaybe<TPackedBinaryIndex> GetFloatFeatureToPackedBinaryIndex(TFloatFeatureIdx floatFeatureIdx) const {
-            return PackedBinaryFeaturesData.FloatFeatureToPackedBinaryIndex[*floatFeatureIdx];
+            return GetFeatureToPackedBinaryIndex(floatFeatureIdx);
         }
 
         TMaybe<TPackedBinaryIndex> GetCatFeatureToPackedBinaryIndex(TCatFeatureIdx catFeatureIdx) const {
-            return PackedBinaryFeaturesData.CatFeatureToPackedBinaryIndex[*catFeatureIdx];
+            return GetFeatureToPackedBinaryIndex(catFeatureIdx);
         }
 
         template <EFeatureType FeatureType>
-        TMaybe<TPackedBinaryIndex> GetFeatureToPackedBinaryIndex(TFeatureIdx<FeatureType> featureIdx) const {
-            if constexpr (FeatureType == EFeatureType::Float) {
-                return GetFloatFeatureToPackedBinaryIndex(featureIdx);
-            } else {
-                return GetCatFeatureToPackedBinaryIndex(featureIdx);
-            }
+        inline TMaybe<TPackedBinaryIndex> GetFeatureToPackedBinaryIndex(TFeatureIdx<FeatureType> featureIdx) const {
+            const ui32 flatFeatureIdx = GetFeaturesLayout()->GetExternalFeatureIdx(*featureIdx, FeatureType);
+            return PackedBinaryFeaturesData.FlatFeatureIndexToPackedBinaryIndex[flatFeatureIdx];
         }
 
         template <EFeatureType FeatureType>
@@ -613,22 +646,19 @@ namespace NCB {
         TMaybe<TExclusiveBundleIndex> GetFloatFeatureToExclusiveBundleIndex(
             TFloatFeatureIdx floatFeatureIdx
         ) const {
-            return ExclusiveFeatureBundlesData.FloatFeatureToBundlePart[*floatFeatureIdx];
+            return GetFeatureToExclusiveBundleIndex(floatFeatureIdx);
         }
 
         TMaybe<TExclusiveBundleIndex> GetCatFeatureToExclusiveBundleIndex(TCatFeatureIdx catFeatureIdx) const {
-            return ExclusiveFeatureBundlesData.CatFeatureToBundlePart[*catFeatureIdx];
+            return GetFeatureToExclusiveBundleIndex(catFeatureIdx);
         }
 
         template <EFeatureType FeatureType>
-        TMaybe<TExclusiveBundleIndex> GetFeatureToExclusiveBundleIndex(
+        inline TMaybe<TExclusiveBundleIndex> GetFeatureToExclusiveBundleIndex(
             TFeatureIdx<FeatureType> featureIdx
         ) const {
-            if constexpr (FeatureType == EFeatureType::Float) {
-                return GetFloatFeatureToExclusiveBundleIndex(featureIdx);
-            } else {
-                return GetCatFeatureToExclusiveBundleIndex(featureIdx);
-            }
+            const ui32 flatFeatureIdx = GetFeaturesLayout()->GetExternalFeatureIdx(*featureIdx, FeatureType);
+            return ExclusiveFeatureBundlesData.FlatFeatureIndexToBundlePart[flatFeatureIdx];
         }
 
         template <EFeatureType FeatureType>
@@ -657,6 +687,12 @@ namespace NCB {
             const TExclusiveFeatureBundlesData& exclusiveFeatureBundlesData
         ) const;
 
+        void CheckFeatureIsNotBinaryPackedOrBundled(
+            EFeatureType featureType,
+            const TStringBuf featureTypeName,
+            ui32 perTypeFeatureIdx
+        ) const;
+
     private:
         TPackedBinaryFeaturesData PackedBinaryFeaturesData;
         TExclusiveFeatureBundlesData ExclusiveFeatureBundlesData;
@@ -664,20 +700,6 @@ namespace NCB {
         // store directly instead of looking up in Data.QuantizedFeaturesInfo for runtime efficiency
         TVector<TCatFeatureUniqueValuesCounts> CatFeatureUniqueValuesCounts; // [catFeatureIdx]
     };
-
-/*
-    // util function for commonly used functionality
-    template <class TBase>
-    inline TConstPtrArraySubset<typename TBase::TValueType> SubsetWithAlternativeIndexing(
-        TMaybeData<const TCompressedValuesHolderImpl<TBase>*> featureData,
-        const TFeaturesArraySubsetIndexing* alternativeIndexing
-    ) {
-        return TConstPtrArraySubset<typename TBase::TValueType>(
-            (*featureData)->GetArrayData().GetSrc(),
-            alternativeIndexing
-        );
-    }
-*/
 
     // needed to make friends with TObjectsDataProvider s
     class TObjectsSerialization {

@@ -15,13 +15,13 @@
 #include <library/grid_creator/binarization.h>
 #include <library/json/json_reader.h>
 #include <library/logger/log.h>
+#include <library/text_processing/dictionary/options.h>
 
 #include <util/generic/algorithm.h>
 #include <util/generic/serialized_enum.h>
 #include <util/generic/strbuf.h>
 #include <util/generic/vector.h>
 #include <util/string/cast.h>
-#include <util/string/iterator.h>
 #include <util/string/join.h>
 #include <util/string/split.h>
 #include <util/stream/file.h>
@@ -70,10 +70,6 @@ inline static TVector<int> ParseIndicesLine(const TStringBuf indicesLine, char d
     return result;
 }
 
-inline static TVector<int> ParseIndicesLine(const TStringBuf indicesLine) {
-    return ParseIndicesLine(indicesLine, ':');
-}
-
 inline static TVector<TVector<int>> ParseIndexSetsLine(const TStringBuf indicesLine) {
     TVector<TVector<int>> result;
     for (const auto& t : StringSplitter(indicesLine).Split(';')) {
@@ -85,6 +81,12 @@ inline static TVector<TVector<int>> ParseIndexSetsLine(const TStringBuf indicesL
 
 inline static void BindPoolLoadParams(NLastGetopt::TOpts* parser, NCatboostOptions::TPoolLoadParams* loadParamsPtr) {
     BindDsvPoolFormatParams(parser, &(loadParamsPtr->DsvPoolFormatParams));
+
+    parser->AddLongOption("cv-no-shuffle", "Do not shuffle dataset before cross-validation")
+      .NoArgument()
+      .Handler0([loadParamsPtr]() {
+      loadParamsPtr->CvParams.Shuffle = false;
+        });
 
     parser->AddLongOption('f', "learn-set", "learn set path")
         .RequiredArgument("[SCHEME://]PATH")
@@ -516,6 +518,67 @@ static void BindModelBasedEvalParams(NLastGetopt::TOpts* parserPtr, NJson::TJson
         .Handler1T<int>([plainJsonPtr](int experimentSize) {
             (*plainJsonPtr)["experiment_size"] = experimentSize;
         });
+    parser
+        .AddLongOption("use-evaluated-features-in-baseline-model")
+        .NoArgument()
+        .Help("Use all evaluated features in baseline model rather than zero out them.")
+        .Handler0([plainJsonPtr]() {
+            (*plainJsonPtr)["use_evaluated_features_in_baseline_model"] = true;
+        });
+}
+
+static void BindFeatureEvalParams(NLastGetopt::TOpts* parserPtr, NJson::TJsonValue* plainJsonPtr) {
+    auto& parser = *parserPtr;
+    parser
+        .AddLongOption("features-to-evaluate")
+        .RequiredArgument("INDEXES[;INDEXES...]")
+        .Help("Evaluate impact of each set of features on test error; each set is a comma-separated list of indices and index intervals, e.g. 4,78-89,312.")
+        .Handler1T<TString>([plainJsonPtr](const TString& indicesLine) {
+            auto featuresToEvaluate = ParseIndexSetsLine(indicesLine);
+            NCatboostOptions::TJsonFieldHelper<TVector<TVector<int>>>::Write(featuresToEvaluate, &(*plainJsonPtr)["features_to_evaluate"]);
+        });
+    parser
+        .AddLongOption("feature-eval-mode")
+        .RequiredArgument("STRING")
+        .Help("Feature evaluation mode; must be one of " + GetEnumAllNames<NCB::EFeatureEvalMode>())
+        .Handler1T<NCB::EFeatureEvalMode>([plainJsonPtr](const auto mode) {
+            (*plainJsonPtr)["feature_eval_mode"] = ToString(mode);
+        });
+    parser
+        .AddLongOption("feature-eval-output-file")
+        .RequiredArgument("STRING")
+        .Help("file containing feature evaluation summary (p-values and metric deltas for each set of tested features)")
+        .Handler1T<TString>([plainJsonPtr](const auto filename) {
+            (*plainJsonPtr)["eval_feature_file"] = ToString(filename);
+        });
+    parser
+        .AddLongOption("offset")
+        .RequiredArgument("INT")
+        .Help("First fold for feature evaluation")
+        .Handler1T<ui32>([plainJsonPtr](const auto offset) {
+            (*plainJsonPtr)["offset"] = offset;
+        });
+    parser
+        .AddLongOption("fold-count")
+        .RequiredArgument("INT")
+        .Help("Fold count for feature evaluation")
+        .Handler1T<ui32>([plainJsonPtr](const auto foldCount) {
+            (*plainJsonPtr)["fold_count"] = foldCount;
+        });
+    parser
+        .AddLongOption("fold-size-unit")
+        .RequiredArgument("STRING")
+        .Help("Units to specify fold size for feature evaluation; must be one of " + GetEnumAllNames<ESamplingUnit>())
+        .Handler1T<ESamplingUnit>([plainJsonPtr](const auto foldSizeUnit) {
+            (*plainJsonPtr)["fold_size_unit"] = ToString(foldSizeUnit);
+        });
+    parser
+        .AddLongOption("fold-size")
+        .RequiredArgument("INT")
+        .Help("Fold size (in fold-size-units) for feature evaluation")
+        .Handler1T<ui32>([plainJsonPtr](const auto foldSize) {
+            (*plainJsonPtr)["fold_size"] = foldSize;
+        });
 }
 
 static void BindTreeParams(NLastGetopt::TOpts* parserPtr, NJson::TJsonValue* plainJsonPtr) {
@@ -604,12 +667,12 @@ static void BindTreeParams(NLastGetopt::TOpts* parserPtr, NJson::TJsonValue* pla
                 (*plainJsonPtr)["dev_efb_max_buckets"] = maxBuckets;
             });
 
-    parser.AddLongOption("efb-max-conflict-fraction",
+    parser.AddLongOption("sparse-features-conflict-fraction",
                          "CPU only. Maximum allowed fraction of conflicting non-default values for features in exclusive features bundle."
                          "Should be a real value in [0, 1) interval.")
             .RequiredArgument("float")
             .Handler1T<float>([plainJsonPtr](float fraction) {
-                (*plainJsonPtr)["efb_max_conflict_fraction"] = fraction;
+                (*plainJsonPtr)["sparse_features_conflict_fraction"] = fraction;
             });
 
     parser.AddLongOption("random-strength")
@@ -729,6 +792,20 @@ static void BindTreeParams(NLastGetopt::TOpts* parserPtr, NJson::TJsonValue* pla
         .Handler1T<TString>([plainJsonPtr](const TString& type) {
             (*plainJsonPtr)["observations_to_bootstrap"] = type;
         });
+
+     parser
+        .AddLongOption("monotone-constraints")
+        .RequiredArgument("String")
+        .Help("Monotone constraints for all features.")
+        .Handler1T<TString>([plainJsonPtr](TString monotonic) {
+            if (!monotonic.empty()) {
+                monotonic.erase(monotonic.begin());
+                monotonic.pop_back();
+                for (const auto& oneFeatureMonotonic : StringSplitter(monotonic).Split(',').SkipEmpty()) {
+                    (*plainJsonPtr)["monotone_constraints"].AppendValue(FromString<int>(oneFeatureMonotonic.Token()));
+                }
+            }
+        });
 }
 
 static void BindCatFeatureParams(NLastGetopt::TOpts* parserPtr, NJson::TJsonValue* plainJsonPtr) {
@@ -824,15 +901,41 @@ static void BindCatFeatureParams(NLastGetopt::TOpts* parserPtr, NJson::TJsonValu
         .Help("If parameter is specified than features with no more than specified value different values will be converted to float features using one-hot encoding. No ctrs will be calculated on this features.");
 }
 
+static void BindTextFeaturesParams(NLastGetopt::TOpts* parserPtr, NJson::TJsonValue* plainJsonPtr) {
+    using namespace NTextProcessing::NDictionary;
+
+    auto& parser = *parserPtr;
+    parser.AddLongOption("text-feature-estimators")
+        .RequiredArgument("Comma separated list of names")
+        .Help("List of feature estimators to compute over each text column in dataset")
+        .Handler1T<TString>([plainJsonPtr](const TString& estimatorsLine) {
+            for (const auto& featureEstimator : StringSplitter(estimatorsLine).Split(',').SkipEmpty()) {
+                FromString<EFeatureCalcerType>(featureEstimator.Token());
+                (*plainJsonPtr)["text_feature_estimators"].AppendValue(NJson::TJsonValue(featureEstimator.Token()));
+            }
+            CB_ENSURE(!(*plainJsonPtr)["text_feature_estimators"].GetArray().empty(), "Empty text features list " << estimatorsLine);
+        });
+
+    parser.AddLongOption("text-processing")
+        .RequiredArgument("DESC[;DESC...]")
+        .Help("Semicolon separated list of text processing descriptions. Text processing description should be written in format "
+            "FeatureId[:min_token_occurence=MinTokenOccurence][:max_dict_size=MaxDictSize][:gram_order=GramOrder][:token_level_type=TokenLevelType]"
+        ).Handler1T<TString>([plainJsonPtr](const TString& descriptionLine) {
+            for (const auto& oneConfig : StringSplitter(descriptionLine).Split(';').SkipEmpty()) {
+                (*plainJsonPtr)["text_processing"].AppendValue(oneConfig.Token());
+            }
+            CB_ENSURE(!(*plainJsonPtr)["text_processing"].GetArray().empty(), "Empty text processing settings " << descriptionLine);
+        });
+}
+
 static void BindDataProcessingParams(NLastGetopt::TOpts* parserPtr, NJson::TJsonValue* plainJsonPtr) {
     auto& parser = *parserPtr;
     parser.AddLongOption('I', "ignore-features",
                          "don't use the specified features in the learn set (the features are separated by colon and can be specified as an inclusive interval, for example: -I 4:78-89:312)")
-        .RequiredArgument("INDEXES")
+        .RequiredArgument("INDEXES or NAMES")
         .Handler1T<TString>([plainJsonPtr](const TString& indicesLine) {
-            auto ignoredFeatures = ParseIndicesLine(indicesLine);
-            for (int f : ignoredFeatures) {
-                (*plainJsonPtr)["ignored_features"].AppendValue(f);
+            for (const auto& ignoredFeature : StringSplitter(indicesLine).Split(':')) {
+                (*plainJsonPtr)["ignored_features"].AppendValue(ignoredFeature.Token());
             }
         });
 
@@ -846,6 +949,12 @@ static void BindDataProcessingParams(NLastGetopt::TOpts* parserPtr, NJson::TJson
         .NoArgument()
         .Handler0([plainJsonPtr]() {
             (*plainJsonPtr)["allow_const_label"] = true;
+        });
+
+    parser.AddLongOption("target-border", "Border for target binarization")
+        .RequiredArgument("float")
+        .Handler1T<float>([plainJsonPtr](float targetBorder) {
+            (*plainJsonPtr)["target_border"] = targetBorder;
         });
 
     parser.AddLongOption("classes-count", "number of classes")
@@ -1055,6 +1164,8 @@ void ParseCommandLine(int argc, const char* argv[],
 
     BindCatFeatureParams(&parser, plainJsonPtr);
 
+    BindTextFeaturesParams(&parser, plainJsonPtr);
+
     BindDataProcessingParams(&parser, plainJsonPtr);
 
     BindBinarizationParams(&parser, plainJsonPtr);
@@ -1111,6 +1222,50 @@ void ParseModelBasedEvalCommandLine(
     BindTreeParams(&parser, plainJsonPtr);
 
     BindCatFeatureParams(&parser, plainJsonPtr);
+
+    BindTextFeaturesParams(&parser, plainJsonPtr);
+
+    BindDataProcessingParams(&parser, plainJsonPtr);
+
+    BindBinarizationParams(&parser, plainJsonPtr);
+
+    BindSystemParams(&parser, plainJsonPtr);
+
+    BindCatboostParams(&parser, plainJsonPtr);
+
+    NLastGetopt::TOptsParseResult parserResult{&parser, argc, argv};
+}
+
+void ParseFeatureEvalCommandLine(
+    int argc,
+    const char* argv[],
+    NJson::TJsonValue* plainJsonPtr,
+    NJson::TJsonValue* featureEvalOptions,
+    TString* paramsPath,
+    NCatboostOptions::TPoolLoadParams* params
+) {
+    auto parser = NLastGetopt::TOpts();
+    parser.AddHelpOption();
+    BindPoolLoadParams(&parser, params);
+
+    parser.AddLongOption("params-file", "Path to JSON file with params.")
+        .RequiredArgument("PATH")
+        .StoreResult(paramsPath)
+        .Help("If param is given in json file and in command line then one from command line will be used.");
+
+    BindMetricParams(&parser, plainJsonPtr);
+
+    BindOutputParams(&parser, plainJsonPtr);
+
+    BindBoostingParams(&parser, plainJsonPtr);
+
+    BindFeatureEvalParams(&parser, featureEvalOptions);
+
+    BindTreeParams(&parser, plainJsonPtr);
+
+    BindCatFeatureParams(&parser, plainJsonPtr);
+
+    BindTextFeaturesParams(&parser, plainJsonPtr);
 
     BindDataProcessingParams(&parser, plainJsonPtr);
 

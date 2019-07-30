@@ -20,63 +20,63 @@ TCommonModelBuilderHelper::TCommonModelBuilderHelper(
     if (!FloatFeatures.empty()) {
         CB_ENSURE(IsSorted(FloatFeatures.begin(), FloatFeatures.end(),
                            [](const TFloatFeature& f1, const TFloatFeature& f2) {
-                               return f1.FeatureId < f2.FeatureId && f1.FlatFeatureIndex < f2.FlatFeatureIndex;
+                               return f1.FeatureId < f2.FeatureId && f1.Position.FlatIndex < f2.Position.FlatIndex;
                            }),
                   "Float features should be sorted"
         );
-        FloatFeaturesInternalIndexesMap.resize((size_t)FloatFeatures.back().FeatureIndex + 1, Max<size_t>());
+        FloatFeaturesInternalIndexesMap.resize((size_t)FloatFeatures.back().Position.Index + 1, Max<size_t>());
         for (auto i : xrange(FloatFeatures.size())) {
-            FloatFeaturesInternalIndexesMap.at((size_t)FloatFeatures[i].FeatureIndex) = i;
+            FloatFeaturesInternalIndexesMap.at((size_t)FloatFeatures[i].Position.Index) = i;
         }
     }
     if (!CatFeatures.empty()) {
         CB_ENSURE(IsSorted(CatFeatures.begin(), CatFeatures.end(),
                            [](const TCatFeature& f1, const TCatFeature& f2) {
-                               return f1.FeatureId < f2.FeatureId && f1.FlatFeatureIndex < f2.FlatFeatureIndex;
+                               return f1.FeatureId < f2.FeatureId && f1.Position.FlatIndex < f2.Position.FlatIndex;
                            }),
                   "Cat features should be sorted"
         );
-        CatFeaturesInternalIndexesMap.resize((size_t)CatFeatures.back().FeatureIndex + 1, Max<size_t>());
+        CatFeaturesInternalIndexesMap.resize((size_t)CatFeatures.back().Position.Index + 1, Max<size_t>());
         for (auto i : xrange(CatFeatures.size())) {
-            CatFeaturesInternalIndexesMap.at((size_t)CatFeatures[i].FeatureIndex) = i;
+            CatFeaturesInternalIndexesMap.at((size_t)CatFeatures[i].Position.Index) = i;
         }
     }
 }
 
-void TCommonModelBuilderHelper::ProcessSplitsSet(const TSet<TModelSplit>& modelSplitSet, TObliviousTrees* tree) {
-    tree->ApproxDimension = ApproxDimension;
-    tree->CatFeatures = CatFeatures;
-    tree->FloatFeatures = FloatFeatures;
-    for (auto& feature : tree->FloatFeatures) {
+void TCommonModelBuilderHelper::ProcessSplitsSet(const TSet<TModelSplit>& modelSplitSet, TObliviousTrees* trees) {
+    trees->ApproxDimension = ApproxDimension;
+    for (auto& feature : FloatFeatures) {
         feature.Borders.clear();
     }
-    for (auto& feature : tree->CatFeatures) {
+    trees->FloatFeatures = std::move(FloatFeatures);
+    for (auto& feature : CatFeatures) {
         feature.UsedInModel = false;
     }
+    trees->CatFeatures = std::move(CatFeatures);
     THashSet<int> usedCatFeatureIndexes;
     for (const auto& split : modelSplitSet) {
         if (split.Type == ESplitType::FloatFeature) {
             const size_t internalFloatIndex = FloatFeaturesInternalIndexesMap.at((size_t)split.FloatFeature.FloatFeature);
-            tree->FloatFeatures.at(internalFloatIndex).Borders.push_back(split.FloatFeature.Split);
+            trees->FloatFeatures.at(internalFloatIndex).Borders.push_back(split.FloatFeature.Split);
         } else if (split.Type == ESplitType::OneHotFeature) {
             usedCatFeatureIndexes.insert(split.OneHotFeature.CatFeatureIdx);
-            if (tree->OneHotFeatures.empty() || tree->OneHotFeatures.back().CatFeatureIndex != split.OneHotFeature.CatFeatureIdx) {
-                auto& ref = tree->OneHotFeatures.emplace_back();
+            if (trees->OneHotFeatures.empty() || trees->OneHotFeatures.back().CatFeatureIndex != split.OneHotFeature.CatFeatureIdx) {
+                auto& ref = trees->OneHotFeatures.emplace_back();
                 ref.CatFeatureIndex = split.OneHotFeature.CatFeatureIdx;
             }
-            tree->OneHotFeatures.back().Values.push_back(split.OneHotFeature.Value);
+            trees->OneHotFeatures.back().Values.push_back(split.OneHotFeature.Value);
         } else {
             const auto& projection = split.OnlineCtr.Ctr.Base.Projection;
             usedCatFeatureIndexes.insert(projection.CatFeatures.begin(), projection.CatFeatures.end());
-            if (tree->CtrFeatures.empty() || tree->CtrFeatures.back().Ctr != split.OnlineCtr.Ctr) {
-                tree->CtrFeatures.emplace_back();
-                tree->CtrFeatures.back().Ctr = split.OnlineCtr.Ctr;
+            if (trees->CtrFeatures.empty() || trees->CtrFeatures.back().Ctr != split.OnlineCtr.Ctr) {
+                trees->CtrFeatures.emplace_back();
+                trees->CtrFeatures.back().Ctr = split.OnlineCtr.Ctr;
             }
-            tree->CtrFeatures.back().Borders.push_back(split.OnlineCtr.Border);
+            trees->CtrFeatures.back().Borders.push_back(split.OnlineCtr.Border);
         }
     }
     for (auto usedCatFeatureIdx : usedCatFeatureIndexes) {
-        tree->CatFeatures[CatFeaturesInternalIndexesMap.at(usedCatFeatureIdx)].UsedInModel = true;
+        trees->CatFeatures[CatFeaturesInternalIndexesMap.at(usedCatFeatureIdx)].UsedInModel = true;
     }
     for (const auto& split : modelSplitSet) {
         const int binFeatureIdx = BinFeatureIndexes.ysize();
@@ -99,7 +99,8 @@ void TObliviousTreeBuilder::AddTree(const TVector<TModelSplit>& modelSplits,
     CB_ENSURE(ApproxDimension == treeLeafValues.ysize());
     auto leafCount = treeLeafValues.at(0).size();
 
-    TVector<double> leafValues(ApproxDimension * leafCount);
+    TVector<double> leafValues;
+    leafValues.yresize(ApproxDimension * leafCount);
 
     for (size_t dimension = 0; dimension < treeLeafValues.size(); ++dimension) {
         CB_ENSURE(treeLeafValues[dimension].size() == (1u << modelSplits.size()));
@@ -117,12 +118,14 @@ void TObliviousTreeBuilder::AddTree(const TVector<TModelSplit>& modelSplits,
     CB_ENSURE((1u << modelSplits.size()) * ApproxDimension == treeLeafValues.size());
     LeafValues.insert(LeafValues.end(), treeLeafValues.begin(), treeLeafValues.end());
     if (!treeLeafWeights.empty()) {
-        LeafWeights.push_back(TVector<double>(treeLeafWeights.begin(), treeLeafWeights.end()));
+        CB_ENSURE((1u << modelSplits.size()) == treeLeafWeights.size());
+        LeafWeights.emplace_back(treeLeafWeights.begin(), treeLeafWeights.end());
     }
     Trees.emplace_back(modelSplits);
 }
 
-TObliviousTrees TObliviousTreeBuilder::Build() {
+void TObliviousTreeBuilder::Build(TObliviousTrees* result) {
+    *result = TObliviousTrees{};
     TSet<TModelSplit> modelSplitSet;
     for (const auto& tree : Trees) {
         for (const auto& split : tree) {
@@ -139,23 +142,21 @@ TObliviousTrees TObliviousTreeBuilder::Build() {
         }
     }
     // filling binary tree splits
-    TObliviousTrees result;
-    ProcessSplitsSet(modelSplitSet, &result);
-    result.LeafValues = LeafValues;
-    result.LeafWeights = LeafWeights;
+    ProcessSplitsSet(modelSplitSet, result);
+    result->LeafValues = std::move(LeafValues);
+    result->LeafWeights = std::move(LeafWeights);
     for (const auto& treeStruct : Trees) {
         for (const auto& split : treeStruct) {
-            result.TreeSplits.push_back(BinFeatureIndexes.at(split));
+            result->TreeSplits.push_back(BinFeatureIndexes.at(split));
         }
-        if (result.TreeStartOffsets.empty()) {
-            result.TreeStartOffsets.push_back(0);
+        if (result->TreeStartOffsets.empty()) {
+            result->TreeStartOffsets.push_back(0);
         } else {
-            result.TreeStartOffsets.push_back(result.TreeStartOffsets.back() + result.TreeSizes.back());
+            result->TreeStartOffsets.push_back(result->TreeStartOffsets.back() + result->TreeSizes.back());
         }
-        result.TreeSizes.push_back(treeStruct.ysize());
+        result->TreeSizes.push_back(treeStruct.ysize());
     }
-    result.UpdateMetadata();
-    return result;
+    result->UpdateRuntimeData();
 }
 
 void TNonSymmetricTreeModelBuilder::AddTree(THolder<TNonSymmetricTreeNode> head) {
@@ -165,27 +166,26 @@ void TNonSymmetricTreeModelBuilder::AddTree(THolder<TNonSymmetricTreeNode> head)
     TreeSizes.push_back(FlatSplitsVector.size() - prevSize);
 }
 
-TObliviousTrees TNonSymmetricTreeModelBuilder::Build() {
-    TObliviousTrees result;
-    ProcessSplitsSet(ModelSplitSet, &result);
+void TNonSymmetricTreeModelBuilder::Build(TObliviousTrees* result) {
+    *result = TObliviousTrees{};
+    ProcessSplitsSet(ModelSplitSet, result);
     Y_ASSERT(FlatSplitsVector.size() == FlatNodeValueIndexes.size());
     Y_ASSERT(FlatNodeValueIndexes.size() == FlatNonSymmetricStepNodes.size());
     Y_ASSERT(LeafWeights.empty() || LeafWeights.size() == FlatValueVector.size() / ApproxDimension);
-    result.NonSymmetricStepNodes = std::move(FlatNonSymmetricStepNodes);
-    result.NonSymmetricNodeIdToLeafId = std::move(FlatNodeValueIndexes);
-    result.LeafValues = std::move(FlatValueVector);
+    result->NonSymmetricStepNodes = std::move(FlatNonSymmetricStepNodes);
+    result->NonSymmetricNodeIdToLeafId = std::move(FlatNodeValueIndexes);
+    result->LeafValues = std::move(FlatValueVector);
     for (const auto& split : FlatSplitsVector) {
         if (split) {
-            result.TreeSplits.push_back(BinFeatureIndexes.at(*split));
+            result->TreeSplits.push_back(BinFeatureIndexes.at(*split));
         } else {
-            result.TreeSplits.push_back(0);
+            result->TreeSplits.push_back(0);
         }
     }
-    result.TreeSizes = std::move(TreeSizes);
-    result.TreeStartOffsets = std::move(TreeStartOffsets);
-    result.LeafWeights.emplace_back(std::move(LeafWeights));
-    result.UpdateMetadata();
-    return result;
+    result->TreeSizes = std::move(TreeSizes);
+    result->TreeStartOffsets = std::move(TreeStartOffsets);
+    result->LeafWeights.emplace_back(std::move(LeafWeights));
+    result->UpdateRuntimeData();
 }
 
 TNonSymmetricTreeModelBuilder::TNonSymmetricTreeModelBuilder(

@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstring>
 #include <stlfwd>
+#include <stdexcept>
+#include <string_view>
 
 #include <util/system/compat.h>
 #include <util/system/yassert.h>
@@ -17,9 +19,6 @@
 #if defined(address_sanitizer_enabled) || defined(thread_sanitizer_enabled)
 #include "hide_ptr.h"
 #endif
-
-[[noreturn]] void ThrowLengthError(const char* descr);
-[[noreturn]] void ThrowRangeError(const char* descr);
 
 namespace NDetail {
     extern void const* STRING_DATA_NULL;
@@ -207,10 +206,14 @@ public:
         return s ? TTraits::GetLength(s) : 0;
     }
 
-    // TODO: DROP! this one provides an implicit TStringBuf -> std::string conversion!
-    template <class T, class A>
-    inline operator std::basic_string<TCharType, T, A>() const {
-        return std::basic_string<TCharType, T, A>(Ptr(), Len());
+    template <class TCharTraits>
+    inline constexpr operator std::basic_string_view<TCharType, TCharTraits>() const {
+        return std::basic_string_view<TCharType>(data(), size());
+    }
+
+    template <class TCharTraits, class Allocator>
+    inline explicit operator std::basic_string<TCharType, TCharTraits, Allocator>() const {
+        return std::basic_string<TCharType, TCharTraits, Allocator>(Ptr(), Len());
     }
 
     /**
@@ -644,7 +647,7 @@ public:
 
     inline size_t copy(TCharType* pc, size_t n, size_t pos) const {
         if (pos > Len()) {
-            ThrowRangeError("TStringBase::copy");
+            throw std::out_of_range("TStringBase::copy");
         }
 
         return CopyImpl(pc, n, pos);
@@ -1325,6 +1328,15 @@ public:
         return *This();
     }
 
+    template <class TCharTraits, class Allocator>
+    /* implicit */ operator std::basic_string<TCharType, TCharTraits, Allocator>() const {
+        // NB(eeight) MSVC cannot compiler direct reference to TBase::operator std::basic_string<...>
+        // so we are using static_cast to force the needed operator call.
+        return static_cast<std::basic_string<TCharType, TCharTraits, Allocator>>(
+                static_cast<const TBase&>(*this));
+    }
+
+
     /*
      * Following overloads of "operator+" aim to choose the cheapest implementation depending on
      * summand types: lvalues, detached rvalues, shared rvalues.
@@ -1557,7 +1569,7 @@ public:
         ins = Min(ins, len1 - pos1);
 
         if (len - del > this->max_size() - ins) { // len-del+ins -- overflow
-            ThrowLengthError("TBasicString::replace");
+            throw std::length_error("TBasicString::replace");
         }
 
         size_t total = len - del + ins;
@@ -1697,34 +1709,14 @@ public:
         return changed;
     }
 
+    /**
+     * @warning these methods do not work with non-ASCII letters.
+     */
     bool to_lower(size_t pos = 0, size_t n = TBase::npos);
     bool to_upper(size_t pos = 0, size_t n = TBase::npos);
     bool to_title(size_t pos = 0, size_t n = TBase::npos);
-
-    /**
-     * @warning doesn't work with non-ASCII letters.
-     */
-    friend TString to_lower(const TString& s) {
-        TString ret(s);
-        ret.to_lower();
-        return ret;
-    }
-
-    /**
-     * @warning doesn't work with non-ASCII letters.
-     */
-    friend TString to_upper(const TString& s) {
-        TString ret(s);
-        ret.to_upper();
-        return ret;
-    }
-
-    friend TString to_title(const TString& s) {
-        TString ret(s);
-        ret.to_title();
-        return ret;
-    }
 };
+std::ostream& operator<<(std::ostream&, const TString&);
 
 class TUtf16String: public TBasicString<TUtf16String, wchar16, TCharTraits<wchar16>> {
     using TBase = TBasicString<TUtf16String, wchar16, TCharTraits<wchar16>>;
@@ -1801,24 +1793,6 @@ public:
     bool to_upper(size_t pos = 0, size_t n = TBase::npos);
     bool to_title();
     // @}
-
-    friend TUtf16String to_lower(const TUtf16String& s) {
-        TUtf16String ret(s);
-        ret.to_lower();
-        return ret;
-    }
-
-    friend TUtf16String to_upper(const TUtf16String& s) {
-        TUtf16String ret(s);
-        ret.to_upper();
-        return ret;
-    }
-
-    friend TUtf16String to_title(const TUtf16String& s) {
-        TUtf16String ret(s);
-        ret.to_title();
-        return ret;
-    }
 };
 
 class TUtf32String: public TBasicString<TUtf32String, wchar32, TCharTraits<wchar32>> {
@@ -1906,27 +1880,7 @@ public:
     bool to_upper(size_t pos = 0, size_t n = TBase::npos);
     bool to_title();
     // @}
-
-    friend TUtf32String to_lower(const TUtf32String& s) {
-        TUtf32String ret(s);
-        ret.to_lower();
-        return ret;
-    }
-
-    friend TUtf32String to_upper(const TUtf32String& s) {
-        TUtf32String ret(s);
-        ret.to_upper();
-        return ret;
-    }
-
-    friend TUtf32String to_title(const TUtf32String& s) {
-        TUtf32String ret(s);
-        ret.to_title();
-        return ret;
-    }
 };
-
-std::ostream& operator<<(std::ostream&, const TString&);
 
 namespace NPrivate {
     template <class Char>
@@ -1953,6 +1907,27 @@ namespace NPrivate {
 
 template <class Char>
 using TGenericString = typename NPrivate::TCharToString<Char>::type;
+
+template<typename TDerived, typename TCharType, typename TTraits>
+TGenericString<TCharType> to_lower(const TBasicString<TDerived, TCharType, TTraits>& s) {
+	TGenericString<TCharType> ret(s);
+	ret.to_lower();
+	return ret;
+}
+
+template<typename TDerived, typename TCharType, typename TTraits>
+TGenericString<TCharType> to_upper(const TBasicString<TDerived, TCharType, TTraits>& s) {
+	TGenericString<TCharType> ret(s);
+	ret.to_upper();
+	return ret;
+}
+
+template<typename TDerived, typename TCharType, typename TTraits>
+TGenericString<TCharType> to_title(const TBasicString<TDerived, TCharType, TTraits>& s) {
+	TGenericString<TCharType> ret(s);
+	ret.to_title();
+	return ret;
+}
 
 namespace std {
     template <>

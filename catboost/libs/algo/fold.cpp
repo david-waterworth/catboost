@@ -1,11 +1,14 @@
 #include "fold.h"
-#include "helpers.h"
+
 #include "approx_updater_helpers.h"
+#include "helpers.h"
 
 #include <catboost/libs/data_types/groupid.h>
 #include <catboost/libs/helpers/permutation.h>
 #include <catboost/libs/helpers/query_info_helper.h>
 #include <catboost/libs/helpers/restorable_rng.h>
+
+#include <library/threading/local_executor/local_executor.h>
 
 #include <util/generic/cast.h>
 
@@ -32,29 +35,6 @@ static ui32 SelectMinBatchSize(ui32 learnSampleCount) {
 
 static double SelectTailSize(ui32 oldSize, double multiplier) {
     return ceil(oldSize * multiplier);
-}
-
-static void InitFromBaseline(
-    const ui32 beginIdx,
-    const ui32 endIdx,
-    TConstArrayRef<TConstArrayRef<float>> baseline,
-    TConstArrayRef<ui32> learnPermutation,
-    bool storeExpApproxes,
-    TVector<TVector<double>>* approx
-) {
-    const ui32 learnSampleCount = learnPermutation.size();
-    const int approxDimension = approx->ysize();
-    for (int dim = 0; dim < approxDimension; ++dim) {
-        TVector<double> tempBaseline(baseline[dim].begin(), baseline[dim].end());
-        ExpApproxIf(storeExpApproxes, &tempBaseline);
-        for (ui32 docId = beginIdx; docId < endIdx; ++docId) {
-            ui32 initialIdx = docId;
-            if (docId < learnSampleCount) {
-                initialIdx = learnPermutation[docId];
-            }
-            (*approx)[dim][docId] = tempBaseline[initialIdx];
-        }
-    }
 }
 
 
@@ -123,7 +103,7 @@ TFold TFold::BuildDynamicFold(
     double multiplier,
     bool storeExpApproxes,
     bool hasPairwiseWeights,
-    TRestorableFastRng64& rand,
+    TRestorableFastRng64* rand,
     NPar::TLocalExecutor* localExecutor
 ) {
     const ui32 learnSampleCount = learnData.GetObjectCount();
@@ -131,9 +111,9 @@ TFold TFold::BuildDynamicFold(
     TFold ff;
     ff.SampleWeights.resize(learnSampleCount, 1);
 
-    InitPermutationData(learnData, shuffle, permuteBlockSize, &rand, &ff);
+    InitPermutationData(learnData, shuffle, permuteBlockSize, rand, &ff);
 
-    ff.AssignTarget(learnData.TargetData->GetTarget(), targetClassifiers);
+    ff.AssignTarget(learnData.TargetData->GetTargetForLoss(), targetClassifiers);
     ff.SetWeights(GetWeights(*learnData.TargetData), learnSampleCount);
 
     TVector<ui32> queryIndices;
@@ -188,7 +168,7 @@ TFold TFold::BuildDynamicFold(
 
         bt.Approx.resize(approxDimension, TVector<double>(bt.TailFinish, GetNeutralApprox(storeExpApproxes)));
         if (baseline) {
-            InitFromBaseline(
+            InitApproxFromBaseline(
                 leftPartLen,
                 bt.TailFinish,
                 *baseline,
@@ -231,7 +211,7 @@ TFold TFold::BuildPlainFold(
     int approxDimension,
     bool storeExpApproxes,
     bool hasPairwiseWeights,
-    TRestorableFastRng64& rand,
+    TRestorableFastRng64* rand,
     NPar::TLocalExecutor* localExecutor
 ) {
     const ui32 learnSampleCount = learnData.GetObjectCount();
@@ -239,9 +219,9 @@ TFold TFold::BuildPlainFold(
     TFold ff;
     ff.SampleWeights.resize(learnSampleCount, 1);
 
-    InitPermutationData(learnData, shuffle, permuteBlockSize, &rand, &ff);
+    InitPermutationData(learnData, shuffle, permuteBlockSize, rand, &ff);
 
-    ff.AssignTarget(learnData.TargetData->GetTarget(), targetClassifiers);
+    ff.AssignTarget(learnData.TargetData->GetTargetForLoss(), targetClassifiers);
     ff.SetWeights(GetWeights(*learnData.TargetData), learnSampleCount);
 
     auto maybeGroupInfos = learnData.TargetData->GetGroupInfo();
@@ -280,7 +260,7 @@ TFold TFold::BuildPlainFold(
 
     TMaybeData<TConstArrayRef<TConstArrayRef<float>>> baseline = learnData.TargetData->GetBaseline();
     if (baseline) {
-        InitFromBaseline(
+        InitApproxFromBaseline(
             0,
             learnSampleCount,
             *baseline,

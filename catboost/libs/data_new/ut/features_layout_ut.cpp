@@ -10,7 +10,7 @@ Y_UNIT_TEST_SUITE(TestFeaturesLayout) {
     Y_UNIT_TEST(TestConstructionWithCatFeatureIndices) {
         TVector<ui32> catFeatures = {1, 5, 9};
         ui32 featuresCount = 10;
-        NCB::TFeaturesLayout layout(featuresCount, catFeatures, TVector<TString>());
+        NCB::TFeaturesLayout layout(featuresCount, catFeatures, TVector<ui32>(), TVector<TString>());
         UNIT_ASSERT_EQUAL(layout.GetExternalFeatureType(0), EFeatureType::Float);
         UNIT_ASSERT_EQUAL(layout.GetExternalFeatureType(1), EFeatureType::Categorical);
         UNIT_ASSERT_EQUAL(layout.GetExternalFeatureType(3), EFeatureType::Float);
@@ -23,38 +23,64 @@ Y_UNIT_TEST_SUITE(TestFeaturesLayout) {
         UNIT_ASSERT_EQUAL(layout.GetExternalFeatureIdx(1, EFeatureType::Float), 2);
     }
 
+    Y_UNIT_TEST(TestConstructionWithCatAndTextFeatureIndices) {
+        TVector<ui32> catFeatures = {2, 9, 5};
+        TVector<ui32> textFeatures = {1, 7, 3};
+        ui32 featuresCount = 10;
+        NCB::TFeaturesLayout layout(featuresCount, catFeatures, textFeatures, TVector<TString>());
+        UNIT_ASSERT_EQUAL(layout.GetExternalFeatureType(0), EFeatureType::Float);
+        UNIT_ASSERT_EQUAL(layout.GetExternalFeatureType(1), EFeatureType::Text);
+        UNIT_ASSERT_EQUAL(layout.GetExternalFeatureType(2), EFeatureType::Categorical);
+        UNIT_ASSERT_EQUAL(layout.GetExternalFeatureType(3), EFeatureType::Text);
+        UNIT_ASSERT_EQUAL(layout.GetExternalFeatureType(4), EFeatureType::Float);
+        UNIT_ASSERT_EQUAL(layout.GetExternalFeatureType(5), EFeatureType::Categorical);
+        UNIT_ASSERT_EQUAL(layout.GetExternalFeatureType(6), EFeatureType::Float);
+        UNIT_ASSERT_EQUAL(layout.GetExternalFeatureType(7), EFeatureType::Text);
+        UNIT_ASSERT_EQUAL(layout.GetExternalFeatureType(9), EFeatureType::Categorical);
+
+        UNIT_ASSERT_EQUAL(layout.GetInternalFeatureIdx(9), 2);
+        UNIT_ASSERT_EQUAL(layout.GetInternalFeatureIdx(2), 0);
+
+        UNIT_ASSERT_EQUAL(layout.GetInternalFeatureIdx(1), 0);
+        UNIT_ASSERT_EQUAL(layout.GetInternalFeatureIdx(3), 1);
+
+        UNIT_ASSERT_EQUAL(layout.GetExternalFeatureIdx(2, EFeatureType::Categorical), 9);
+        UNIT_ASSERT_EQUAL(layout.GetExternalFeatureIdx(1, EFeatureType::Float), 4);
+        UNIT_ASSERT_EQUAL(layout.GetExternalFeatureIdx(0, EFeatureType::Text), 1);
+    }
+
     Y_UNIT_TEST(TestConstructionWithFloatAndCatFeaturesFromModel) {
         TVector<TFloatFeature> floatFeatures(4);
 
-        floatFeatures[0].FeatureIndex = 0;
-        floatFeatures[0].FlatFeatureIndex = 0;
+        floatFeatures[0].Position.Index = 0;
+        floatFeatures[0].Position.FlatIndex = 0;
         floatFeatures[0].FeatureId = "f0";
 
-        floatFeatures[1].FeatureIndex = 1;
-        floatFeatures[1].FlatFeatureIndex = 2;
+        floatFeatures[1].Position.Index = 1;
+        floatFeatures[1].Position.FlatIndex = 2;
         floatFeatures[1].FeatureId = "f1_name1";
 
-        floatFeatures[2].FeatureIndex = 2;
-        floatFeatures[2].FlatFeatureIndex = 3;
+        floatFeatures[2].Position.Index = 2;
+        floatFeatures[2].Position.FlatIndex = 3;
         floatFeatures[2].FeatureId = "f2";
 
-        floatFeatures[3].FeatureIndex = 3;
-        floatFeatures[3].FlatFeatureIndex = 5;
+        floatFeatures[3].Position.Index = 3;
+        floatFeatures[3].Position.FlatIndex = 5;
         floatFeatures[3].FeatureId = "f3";
 
 
         TVector<TCatFeature> catFeatures(3);
 
-        catFeatures[0].FeatureIndex = 0;
-        catFeatures[0].FlatFeatureIndex = 1;
+        catFeatures[0].Position.Index = 0;
+        catFeatures[0].Position.FlatIndex = 1;
         catFeatures[0].FeatureId = "c0_catname0";
 
-        catFeatures[1].FeatureIndex = 1;
-        catFeatures[1].FlatFeatureIndex = 4;
+        catFeatures[1].Position.Index = 1;
+        catFeatures[1].Position.FlatIndex = 4;
         catFeatures[1].FeatureId = "c1";
 
-        catFeatures[2].FeatureIndex = 2;
-        catFeatures[2].FlatFeatureIndex = 6;
+        catFeatures[2].Position.Index = 2;
+        catFeatures[2].Position.FlatIndex = 6;
         catFeatures[2].FeatureId = "c2";
 
         const NCB::TFeaturesLayout layout(floatFeatures, catFeatures);
@@ -114,27 +140,27 @@ Y_UNIT_TEST_SUITE(TestFeaturesLayout) {
     Y_UNIT_TEST(TestSkippedFeatures) {
         TVector<TFloatFeature> floatFeatures(3);
 
-        floatFeatures[0].FeatureIndex = 0;
-        floatFeatures[0].FlatFeatureIndex = 0;
+        floatFeatures[0].Position.Index = 0;
+        floatFeatures[0].Position.FlatIndex = 0;
         floatFeatures[0].FeatureId = "f0";
 
-        floatFeatures[1].FeatureIndex = 1;
-        floatFeatures[1].FlatFeatureIndex = 2;
+        floatFeatures[1].Position.Index = 1;
+        floatFeatures[1].Position.FlatIndex = 2;
         floatFeatures[1].FeatureId = "f1_name1";
 
-        floatFeatures[2].FeatureIndex = 3;
-        floatFeatures[2].FlatFeatureIndex = 5;
+        floatFeatures[2].Position.Index = 3;
+        floatFeatures[2].Position.FlatIndex = 5;
         floatFeatures[2].FeatureId = "f3";
 
 
         TVector<TCatFeature> catFeatures(2);
 
-        catFeatures[0].FeatureIndex = 0;
-        catFeatures[0].FlatFeatureIndex = 1;
+        catFeatures[0].Position.Index = 0;
+        catFeatures[0].Position.FlatIndex = 1;
         catFeatures[0].FeatureId = "c0_catname0";
 
-        catFeatures[1].FeatureIndex = 2;
-        catFeatures[1].FlatFeatureIndex = 6;
+        catFeatures[1].Position.Index = 2;
+        catFeatures[1].Position.FlatIndex = 6;
         catFeatures[1].FeatureId = "c2";
 
         const NCB::TFeaturesLayout layout(floatFeatures, catFeatures);
@@ -191,15 +217,24 @@ Y_UNIT_TEST_SUITE(TestFeaturesLayout) {
 
     Y_UNIT_TEST(Operator_Equal) {
         TVector<ui32> catFeatures = {1, 5, 9};
+        TVector<ui32> textFeatures = {3, 8};
+
         ui32 featuresCount = 10;
-        NCB::TFeaturesLayout layout(featuresCount, catFeatures, TVector<TString>());
+        NCB::TFeaturesLayout layout(featuresCount, catFeatures, textFeatures, TVector<TString>());
 
         UNIT_ASSERT_EQUAL(layout, layout);
 
         {
             TVector<ui32> catFeatures2 = {1, 5};
             ui32 featuresCount2 = 9;
-            NCB::TFeaturesLayout layout2(featuresCount2, catFeatures2, TVector<TString>());
+            NCB::TFeaturesLayout layout2(featuresCount2, catFeatures2, textFeatures, TVector<TString>());
+
+            UNIT_ASSERT_UNEQUAL(layout, layout2);
+        }
+
+        {
+            TVector<ui32> textFeatures2 = {3};
+            NCB::TFeaturesLayout layout2(featuresCount, catFeatures, textFeatures2, TVector<TString>());
 
             UNIT_ASSERT_UNEQUAL(layout, layout2);
         }
@@ -208,6 +243,7 @@ Y_UNIT_TEST_SUITE(TestFeaturesLayout) {
             NCB::TFeaturesLayout layoutWithNames(
                 featuresCount,
                 catFeatures,
+                textFeatures,
                 TVector<TString>{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
             );
 
@@ -220,18 +256,18 @@ Y_UNIT_TEST_SUITE(TestFeaturesLayout) {
         ui32 featuresCount = 10;
         auto featureNames = TVector<TString>{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"};
 
-        NCB::TFeaturesLayout layout(featuresCount, catFeatures, featureNames);
+        NCB::TFeaturesLayout layout(featuresCount, catFeatures, TVector<ui32>(), featureNames);
 
         NCB::CheckCompatibleForApply(layout, layout, "test data");
 
         {
-            NCB::TFeaturesLayout layoutWithoutNames(featuresCount, catFeatures, TVector<TString>());
+            NCB::TFeaturesLayout layoutWithoutNames(featuresCount, catFeatures, TVector<ui32>(), TVector<TString>());
             NCB::CheckCompatibleForApply(layout, layoutWithoutNames, "test data");
         }
         {
             TVector<ui32> catFeatures2 = {1, 5};
             ui32 featuresCount2 = 9;
-            NCB::TFeaturesLayout layout2(featuresCount2, catFeatures2, TVector<TString>());
+            NCB::TFeaturesLayout layout2(featuresCount2, catFeatures2, TVector<ui32>(), TVector<TString>());
 
             UNIT_ASSERT_EXCEPTION(
                 NCB::CheckCompatibleForApply(layout, layout2, "test data"),
@@ -239,18 +275,18 @@ Y_UNIT_TEST_SUITE(TestFeaturesLayout) {
             );
         }
         {
-            NCB::TFeaturesLayout layoutWithIgnored(featuresCount, catFeatures, TVector<TString>());
+            NCB::TFeaturesLayout layoutWithIgnored(featuresCount, catFeatures, TVector<ui32>(), TVector<TString>());
             layoutWithIgnored.IgnoreExternalFeature(0);
             layoutWithIgnored.IgnoreExternalFeature(2);
 
             NCB::CheckCompatibleForApply(layoutWithIgnored, layout, "test data");
         }
         {
-            NCB::TFeaturesLayout shorterLayout(ui32(5), TVector<ui32>{1}, TVector<TString>());
+            NCB::TFeaturesLayout shorterLayout(ui32(5), TVector<ui32>{1}, TVector<ui32>(), TVector<TString>());
             NCB::CheckCompatibleForApply(shorterLayout, layout, "test data");
         }
         {
-            NCB::TFeaturesLayout longerLayout(ui32(12), catFeatures, TVector<TString>());
+            NCB::TFeaturesLayout longerLayout(ui32(12), catFeatures, TVector<ui32>(), TVector<TString>());
             NCB::CheckCompatibleForApply(layout, longerLayout, "test data");
 
             UNIT_ASSERT_EXCEPTION(
@@ -259,7 +295,7 @@ Y_UNIT_TEST_SUITE(TestFeaturesLayout) {
             );
         }
         {
-            NCB::TFeaturesLayout longerLayoutWithIgnored(ui32(12), catFeatures, TVector<TString>());
+            NCB::TFeaturesLayout longerLayoutWithIgnored(ui32(12), catFeatures, TVector<ui32>(), TVector<TString>());
             longerLayoutWithIgnored.IgnoreExternalFeature(10);
             longerLayoutWithIgnored.IgnoreExternalFeature(11);
             NCB::CheckCompatibleForApply(longerLayoutWithIgnored, layout, "test data");

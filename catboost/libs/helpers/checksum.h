@@ -18,7 +18,7 @@ namespace NCB {
     // override UpdateCheckSumImpl for non-trivial types
 
     template <class T>
-    inline ui32 UpdateCheckSumImpl(ui32 init, const TConstArrayRef<T>& arrayRef) {
+    inline ui32 UpdateCheckSumImpl(ui32 init, TConstArrayRef<T> arrayRef) {
         if constexpr(std::is_trivial<T>::value) {
             return Crc32cExtend(init, arrayRef.data(), sizeof(T)*arrayRef.size());
         } else {
@@ -65,5 +65,9 @@ namespace NCB {
         }
     }
 
-}
+    template <typename THead, typename... TTail>
+    inline ui32 UpdateCheckSum(ui32 init, const THead& head, const TTail&... tail) {
+        return UpdateCheckSum(UpdateCheckSum(init, head), tail...);
+    }
 
+}

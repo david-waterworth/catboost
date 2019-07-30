@@ -156,11 +156,6 @@ void NCB::CheckOneGroupInfo(const TQueryInfo& groupInfo) {
     }
 }
 
-// local definition because there's no universal way to print NCB::TIndexRange
-static TString HumanReadable(TGroupBounds groupBounds) {
-    return TStringBuilder() << '[' << groupBounds.Begin << ',' << groupBounds.End << ')';
-}
-
 void NCB::CheckGroupInfo(
     TConstArrayRef<TQueryInfo> groupInfoVector,
     const TObjectsGrouping& objectsGrouping,
@@ -182,9 +177,9 @@ void NCB::CheckGroupInfo(
         try {
             CB_ENSURE_INTERNAL(
                 (TGroupBounds)groupInfo == objectsGrouping.GetGroup(i),
-                "bounds " << HumanReadable(groupInfo)
+                "bounds " << ((const TGroupBounds&) groupInfo)
                 << " are not equal to grouping's corresponding group bounds: "
-                << HumanReadable(objectsGrouping.GetGroup(i))
+                << objectsGrouping.GetGroup(i)
             );
             CheckOneGroupInfo(groupInfo);
             if (!groupInfo.Competitors.empty()) {
@@ -683,7 +678,7 @@ void TProcessedTargetData::Save(IBinSaver* binSaver) const {
 
     SaveMulti(binSaver, cache);
 
-    SaveRawData(
+    SaveArrayData(
         TConstArrayRef<ui8>((ui8*)serializedTargetDataWithIds.Data(), serializedTargetDataWithIds.Size()),
         binSaver
     );
@@ -852,6 +847,8 @@ using TSrcToSubsetDataCache = TTargetSingleTypeDataCache<TSharedDataPtr, TShared
 
 struct TSubsetTargetDataCache {
     TSrcToSubsetDataCache<TSharedVector<float>> Targets;
+    using TBinaryTarget = TMaybe<TSharedVector<float>>;
+    std::pair<TBinaryTarget, TBinaryTarget> BinaryTarget;
     TSrcToSubsetDataCache<TSharedWeights<float>> Weights;
 
     // multidim baselines are stored as separate pointers for simplicity
@@ -932,6 +929,18 @@ static void FillSubsetTargetDataCache(
         );
     });
 
+    if (subsetTargetDataCache->BinaryTarget.first) {
+        tasks.emplace_back([&] () {
+            subsetTargetDataCache->BinaryTarget.second.ConstructInPlace();
+            GetObjectsFloatDataSubsetImpl(
+                *subsetTargetDataCache->BinaryTarget.first,
+                objectsGroupingSubset,
+                localExecutor,
+                &(*subsetTargetDataCache->BinaryTarget.second)
+            );
+        });
+    }
+
     tasks.emplace_back([&] () {
         FillSubsetTargetDataCacheSubType<TSharedVector<float>>(
             objectsGroupingSubset,
@@ -963,6 +972,7 @@ TIntrusivePtr<TTargetDataProvider> TTargetDataProvider::GetSubset(
     for (const auto& [name, targetsData] : Data.Targets) {
         subsetTargetDataCache.Targets.emplace(targetsData, TSharedVector<float>());
     }
+    subsetTargetDataCache.BinaryTarget = {Data.BinaryTarget, Nothing()};
     for (const auto& [name, weightsData] : Data.Weights) {
         subsetTargetDataCache.Weights.emplace(weightsData, TSharedWeights<float>());
     }
@@ -986,6 +996,7 @@ TIntrusivePtr<TTargetDataProvider> TTargetDataProvider::GetSubset(
     for (const auto& [name, targetsData] : Data.Targets) {
         subsetData.Targets.emplace(name, subsetTargetDataCache.Targets.at(targetsData));
     }
+    subsetData.BinaryTarget = subsetTargetDataCache.BinaryTarget.second;
     for (const auto& [name, weightsData] : Data.Weights) {
         subsetData.Weights.emplace(name, subsetTargetDataCache.Weights.at(weightsData));
     }

@@ -1,5 +1,10 @@
 #pragma once
 
+#include <catboost/libs/model/enums.h>
+
+#include <util/system/types.h>
+
+
 enum class EConvertTargetPolicy {
     CastFloat,
     UseClassNames,
@@ -25,7 +30,8 @@ enum class ESamplingUnit {
 
 enum class EFeatureType {
     Float,
-    Categorical
+    Categorical,
+    Text
 };
 
 enum EErrorType {
@@ -64,9 +70,9 @@ enum class ELeavesEstimation {
 
 enum class EScoreFunction {
     SolarL2,
-    Correlation,
+    Cosine,
     NewtonL2,
-    NewtonCorrelation,
+    NewtonCosine,
     LOOL2,
     SatL2,
     L2
@@ -111,6 +117,7 @@ enum class ELossFunction {
     Lq,
     MAE,
     Quantile,
+    Expectile,
     LogLinQuantile,
     MAPE,
     Poisson,
@@ -147,6 +154,7 @@ enum class ELossFunction {
 
     R2,
     NumErrors,
+    FairLoss,
 
     /* classification metrics */
 
@@ -166,6 +174,7 @@ enum class ELossFunction {
     Kappa,
     WKappa,
     LogLikelihoodOfPrediction,
+    NormalizedGini,
 
     /* pair metrics */
 
@@ -178,14 +187,21 @@ enum class ELossFunction {
     PrecisionAt,
     RecallAt,
     MAP,
-    NDCG
+    NDCG,
+    DCG,
+    FilteredDCG
+};
+
+enum class ERankingType {
+    CrossEntropy,
+    AbsoluteValue,
+    Order
 };
 
 enum class EHessianType {
     Symmetric,
     Diagonal
 };
-
 
 enum class ECounterCalc {
     Full,
@@ -207,6 +223,12 @@ enum class EFstrType {
     Interaction,
     InternalInteraction,
     ShapValues
+};
+
+enum class EPreCalcShapValues {
+    Auto,
+    UsePreCalc,
+    NoPreCalc
 };
 
 enum class EObservationsToBootstrap {
@@ -241,15 +263,6 @@ enum class ENodeType {
     SingleHost
 };
 
-enum class EModelType {
-    CatboostBinary /* "CatboostBinary", "cbm", "catboost" */,
-    AppleCoreML    /* "AppleCoreML", "coreml"     */,
-    Cpp            /* "Cpp", "CPP", "cpp" */,
-    Python         /* "Python", "python" */,
-    Json           /* "Json", "json"       */,
-    Onnx           /* "Onnx", "onnx" */
-};
-
 enum class EFinalCtrComputationMode {
     Skip,
     Default
@@ -271,6 +284,11 @@ enum class ENdcgMetricType {
     Exp
 };
 
+enum class ENdcgDenominatorType {
+    LogPosition,
+    Position
+};
+
 enum class EMetricBestValue {
     Max,
     Min,
@@ -278,7 +296,7 @@ enum class EMetricBestValue {
     Undefined
 };
 
-enum class EFeatureCalculatorType {
+enum class EFeatureCalcerType : ui32 {
 //Examples
 //    LinearModel,
 //    TfIdf,
@@ -288,5 +306,19 @@ enum class EFeatureCalculatorType {
     BM25,
     CosDistanceWithClassCenter,
     GaussianHomoscedasticModel,
-    GaussianHeteroscedasticiModel
+    GaussianHeteroscedasticModel,
+    EmbeddingDistanceToClass
 };
+
+enum class ETokenizerType {
+    Naive,
+    UserDefined
+};
+
+namespace NCB {
+    enum class EFeatureEvalMode {
+        OneVsNone,
+        OneVsOthers,
+        OneVsAll
+    };
+}
